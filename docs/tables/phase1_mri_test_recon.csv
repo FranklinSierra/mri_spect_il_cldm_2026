@@ -1,0 +1,3 @@
+population,PSNR_mean,SSIM_mean,n
+control,6.2464,0.5376,15
+parkinson,6.715,0.5247,23

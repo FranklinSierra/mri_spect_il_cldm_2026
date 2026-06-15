@@ -1,0 +1,19 @@
+{
+  "name": "IL-CLDM MRI-SPECT (example with external data mount)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "runArgs": [
+    "--gpus=all",
+    "--ipc=host",
+    "--shm-size=16g"
+  ],
+  "mounts": [
+    "source=${localEnv:HOST_DATA_DIR},target=/workspace/IL-CLDM/data,type=bind"
+  ],
+  "containerEnv": {
+    "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+    "CUDA_VISIBLE_DEVICES": "0"
+  }
+}

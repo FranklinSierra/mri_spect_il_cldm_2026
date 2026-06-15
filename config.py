@@ -1,25 +1,71 @@
 import torch
+import os
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-noiseSteps = 1000
+device = os.getenv("ILCLDM_DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
+noiseSteps = int(os.getenv("ILCLDM_NOISE_STEPS", "1000"))
+sampling_steps = int(os.getenv("ILCLDM_SAMPLING_STEPS", "100"))
+ddim_eta = float(os.getenv("ILCLDM_DDIM_ETA", "0.0"))
 latent_dim = 1
-learning_rate = 1e-4
-batch_size = 2
+learning_rate = float(os.getenv("ILCLDM_LR", "1e-4"))
+batch_size = int(os.getenv("ILCLDM_BATCH_SIZE", "2"))
 numworker = 0
-epochs = 1000
+epochs = int(os.getenv("ILCLDM_EPOCHS", "1000"))
+validation_interval = int(os.getenv("ILCLDM_VALIDATION_INTERVAL", "5"))
+early_stopping_patience = int(os.getenv("ILCLDM_EARLY_STOPPING_PATIENCE", "10"))
 time_dim = 128
 num_classes = 2
 Lambda = 100
+# ILCLDM_NORMALIZE=1 -> min-max on load instead of per-volume z-score (image volumes only)
+normalize_volumes = os.getenv("ILCLDM_NORMALIZE", "0") == "1"
 
-exp = "exp_1/"
+# Stage-1 / image-space SPECT losses (z-score aware)
+USE_WEIGHTED_RECON_LOSS = os.getenv("ILCLDM_USE_WEIGHTED_RECON", "1") == "1"
+USE_TAIL_RECON_LOSS = os.getenv("ILCLDM_USE_TAIL_RECON", "1") == "1"
+WEIGHTED_RECON_ALPHA = float(os.getenv("ILCLDM_WEIGHTED_ALPHA", "3.0"))
+WEIGHTED_Z_THRESHOLD = float(os.getenv("ILCLDM_WEIGHTED_Z_THRESH", "1.0"))
+TAIL_RECON_FRACTION = float(os.getenv("ILCLDM_TAIL_FRACTION", "0.05"))
+TAIL_RECON_BETA = float(os.getenv("ILCLDM_TAIL_BETA", "1.0"))
+
+# Stage-2 auxiliary decode loss in image space
+AUX_IMAGE_LOSS = os.getenv("ILCLDM_AUX_IMAGE_LOSS", "1") == "1"
+AUX_IMAGE_EVERY_N = int(os.getenv("ILCLDM_AUX_IMAGE_EVERY_N", "10"))
+AUX_IMAGE_LAMBDA = float(os.getenv("ILCLDM_AUX_IMAGE_LAMBDA", "0.25"))
+AUX_IMAGE_ALWAYS_HIGH_T = os.getenv("ILCLDM_AUX_IMAGE_ALWAYS_HIGH_T", "0") == "1"
+
+# Stage-2 v2: latent-space loss and high-noise timestep sampling
+LATENT_LOSS = os.getenv("ILCLDM_LATENT_LOSS", "0") == "1"
+LATENT_LOSS_LAMBDA = float(os.getenv("ILCLDM_LATENT_LOSS_LAMBDA", "0.5"))
+HIGH_T_SAMPLE_PROB = float(os.getenv("ILCLDM_HIGH_T_SAMPLE_PROB", "0"))
+HIGH_T_THRESHOLD = int(os.getenv("ILCLDM_HIGH_T_THRESHOLD", "700"))
+
+# Stage-2 v2: ROI-weighted aux loss (basal ganglia mask, same crop as volumes)
+ROI_MASK_PATH = os.getenv("ILCLDM_ROI_MASK_PATH", "data/mask_basal_ganglia.nii.gz")
+ROI_WEIGHT_ALPHA = float(os.getenv("ILCLDM_ROI_WEIGHT_ALPHA", "3.0"))
+USE_ROI_LOSS = os.getenv("ILCLDM_USE_ROI_LOSS", "0") == "1"
+
+# Stage-2 v2: early stopping on validation latent MSE (else legacy PSNR+SSIM*10)
+EARLY_STOP_LATENT_METRIC = os.getenv("ILCLDM_EARLY_STOP_LATENT_METRIC", "0") == "1"
+
+exp = os.getenv("ILCLDM_EXP", "exp_1/")
 whole_Abeta = "./data/whole_Abeta"
 latent_Abeta = "./data/latent_Abeta/"
 whole_MRI = "./data/whole_MRI"
-path = "./data/whole_MRI/037S6046.nii"
+latent_MRI = "./data/latent_MRI/"
+path = os.getenv("ILCLDM_REFERENCE_NIFTI", "./data/whole_MRI/3151.nii.gz")
 gpus = [0]
 
-CHECKPOINT_AAE = "result/"+exp+"AAE.pth.tar"
+# Stage-2: optional path to a frozen SPECT AAE (e.g. E1 checkpoint without copying into result/<exp>/)
+CHECKPOINT_AAE = os.getenv("ILCLDM_AAE_CHECKPOINT", "result/" + exp + "AAE.pth.tar")
 CHECKPOINT_Unet = "result/"+exp+"Unet.pth.tar"
+CHECKPOINT_MRI_ENCODER = "result/"+exp+"MRI_Encoder.pth.tar"
+
+RUN_STAGE1_MRI_PRETRAIN = os.getenv("ILCLDM_RUN_STAGE1_MRI_PRETRAIN", "0") == "1"
+RUN_STAGE1_EMBED_EVAL = os.getenv("ILCLDM_RUN_STAGE1_EMBED_EVAL", "0") == "1"
+RUN_STAGE2_DIFFUSION = os.getenv("ILCLDM_RUN_STAGE2_DIFFUSION", "1") == "1"
+FREEZE_MRI_ENCODER = os.getenv("ILCLDM_FREEZE_MRI_ENCODER", "0") == "1"
+MRI_ENCODER_MODE = os.getenv("ILCLDM_MRI_ENCODER_MODE", "").strip().lower()
+MRI_ENCODER_CHECKPOINT = os.getenv("ILCLDM_MRI_ENCODER_CHECKPOINT", CHECKPOINT_MRI_ENCODER)
+MRI_ENCODER_FINETUNE_LR_SCALE = float(os.getenv("ILCLDM_MRI_ENCODER_FINETUNE_LR_SCALE", "0.25"))
 
 train = "data_info/train.txt"
 validation = "data_info/validation.txt"

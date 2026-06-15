@@ -1,0 +1,25 @@
+# Local volumes and experiment outputs (not versioned)
+data/*
+dataV2/*
+result/*
+temp_data/*
+CoCoLIT/
+
+# Local-only docs (reports with internal paths, large PDFs, audit JSON, etc.)
+docs/local/
+docs/reports/
+
+# Legacy template (not used by IL-CLDM pipeline)
+data_info/IDs
+
+# Environment and secrets
+.env
+
+# Runtime artifacts
+logs/
+*.log
+*.pid
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.cursor/

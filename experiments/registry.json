@@ -1,0 +1,60 @@
+{
+  "base_frozen": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0"
+  },
+  "experiments": {
+    "frozen_v1": {
+      "exp": "exp_nm_s2_mri_frozen",
+      "run_id": "nm_stage2_v1",
+      "label": "Frozen v1 (baseline)",
+      "early_stop": "image",
+      "base": null,
+      "overrides": {}
+    },
+    "frozen_v2": {
+      "exp": "exp_nm_s2_mri_frozen_v2",
+      "run_id": "nm_stage2_v2",
+      "label": "Frozen v2 (historico)",
+      "early_stop": "latent",
+      "base": null,
+      "overrides": {}
+    },
+    "abl_latloss02": {
+      "exp": "exp_nm_s2_frozen_abl_latloss02",
+      "run_id": "abl_latloss02",
+      "label": "Abl: latent loss 0.2",
+      "early_stop": "image",
+      "base": "base_frozen",
+      "overrides": {
+        "ILCLDM_LATENT_LOSS": "1",
+        "ILCLDM_LATENT_LOSS_LAMBDA": "0.2"
+      }
+    },
+    "abl_hight05": {
+      "exp": "exp_nm_s2_frozen_abl_hight05",
+      "run_id": "abl_hight05",
+      "label": "Abl: high-t sampling 0.5",
+      "early_stop": "image",
+      "base": "base_frozen",
+      "overrides": {
+        "ILCLDM_HIGH_T_SAMPLE_PROB": "0.5",
+        "ILCLDM_HIGH_T_THRESHOLD": "700"
+      }
+    },
+    "abl_auxfreq5": {
+      "exp": "exp_nm_s2_frozen_abl_auxfreq5",
+      "run_id": "abl_auxfreq5",
+      "label": "Abl: aux image cada 5",
+      "early_stop": "image",
+      "base": "base_frozen",
+      "overrides": {
+        "ILCLDM_AUX_IMAGE_LOSS": "1",
+        "ILCLDM_AUX_IMAGE_EVERY_N": "5",
+        "ILCLDM_AUX_IMAGE_LAMBDA": "0.25"
+      }
+    }
+  }
+}

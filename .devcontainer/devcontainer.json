@@ -1,0 +1,27 @@
+{
+  "name": "IL-CLDM MRI-SPECT",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "runArgs": [
+    "--gpus=all",
+    "--ipc=host",
+    "--shm-size=16g"
+  ],
+  "containerEnv": {
+    "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+    "CUDA_VISIBLE_DEVICES": "0",
+    "ILCLDM_EPOCHS": "1000",
+    "ILCLDM_NOISE_STEPS": "1000"
+  },
+  "postCreateCommand": "python -c \"import torch, nibabel, pandas, skimage; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())\"",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.debugpy"
+      ]
+    }
+  }
+}

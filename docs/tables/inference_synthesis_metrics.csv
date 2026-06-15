@@ -1,0 +1,5 @@
+split,population,PSNR_mean,SSIM_mean,n
+test,control,2.8409,0.0441,15
+test,parkinson,2.8459,0.0599,23
+train,control,2.8681,0.0421,58
+train,parkinson,3.0238,0.0491,91

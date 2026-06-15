@@ -83,6 +83,11 @@ class Encoder(nn.Module):
         out = self.model(x)
         return out
 
+
+class MRIEncoder(Encoder):
+    """Dedicated encoder alias for MRI pretraining/freezing workflows."""
+    pass
+
 class Decoder(nn.Module):
     def __init__(self, image_channels = 1, latent_dim = config.latent_dim):
         super(Decoder, self).__init__()
@@ -119,6 +124,17 @@ class AAE(nn.Module):
         encoded_data = self.encoder(data)
         decoded_data = self.decoder(encoded_data)
         return decoded_data
+
+
+class MRIAutoencoderHead(nn.Module):
+    """Explicit MRI autoencoder container used in staged pipelines."""
+    def __init__(self):
+        super().__init__()
+        self.encoder = MRIEncoder()
+        self.decoder = Decoder()
+
+    def forward(self, data):
+        return self.decoder(self.encoder(data))
 
 class Discriminator(nn.Module):
     def __init__(self, image_channels = 1, channels = [16, 32, 64, 128]):
@@ -324,28 +340,11 @@ class UNet(nn.Module):
 
         self.ups = nn.ModuleList(ups)
         self.final_conv = Block(pre_channel, default(out_channel, in_channel), groups=norm_groups)
-        self.cond = nn.Sequential(
-            nn.Conv3d(1, 16, 4, 2, 1),
-            ResidualBlock(16, 16),
-            GroupNorm(16),
-            Swish(),
-            nn.Conv3d(16, 1, 4, 2, 1),
-            )
+        self.cond = DiffusionConditioner()
         self.label_emb = nn.Embedding(config.num_classes, time_dim)
     
-    def forward(self, x, y, time, label=None):
-        cond = self.cond(y)
-        x =torch.cat([x,cond],dim=1)
-        t = self.time_mlp(time)
-
-        if label is not None:
-            label = label.squeeze()
-            label = label.long()
-            k = self.label_emb(label)
-            t =  t + k
-
-    def forward(self, x, y, time, label=None):
-        cond = self.condition(y)
+    def forward(self, x, y, time, label=None, precomputed_condition=False):
+        cond = y if precomputed_condition else self.cond(y)
         x = torch.cat([x,cond],dim=1)
         feats = []
 
@@ -376,6 +375,21 @@ class UNet(nn.Module):
                 x = layer(x)
 
         return self.final_conv(x)
+
+
+class DiffusionConditioner(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv3d(1, 16, 4, 2, 1),
+            ResidualBlock(16, 16),
+            GroupNorm(16),
+            Swish(),
+            nn.Conv3d(16, 1, 4, 2, 1),
+        )
+
+    def forward(self, x):
+        return self.layers(x)
 
 class EMA:
     def __init__(self, beta):
