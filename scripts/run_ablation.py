@@ -44,6 +44,11 @@ def resolve_env(registry, key):
         env.update(registry[base_key])
     env.update(entry.get("overrides", {}))
     env["ILCLDM_EXP"] = entry["exp"].rstrip("/") + "/"
+    if entry.get("parent"):
+        env["ILCLDM_PARENT_EXPERIMENT"] = entry["parent"]
+    if entry.get("init_checkpoint"):
+        env["ILCLDM_UNET_INIT_CHECKPOINT"] = entry["init_checkpoint"]
+    env["ILCLDM_REGISTRY_KEY"] = key
     return entry, env
 
 
@@ -65,6 +70,10 @@ def main():
 
     print(f"[run_ablation] key={args.key} exp={entry['exp']} run_id={entry['run_id']}")
     print(f"[run_ablation] label={entry['label']} early_stop={entry['early_stop']}")
+    if entry.get("split_profile"):
+        print(f"[run_ablation] split_profile={entry['split_profile']}")
+    if entry.get("prerequisite"):
+        print(f"[run_ablation] prerequisite: {entry['prerequisite']}")
     if args.gpu is not None:
         print(f"[run_ablation] CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
     for name in sorted(env):

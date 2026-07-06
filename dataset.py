@@ -5,6 +5,7 @@ import nibabel as nib
 import pandas as pd
 import numpy as np
 import config
+import json
 import os
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -40,31 +41,115 @@ def zscore_volume(data: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     return data.astype(np.float32, copy=False)
 
 
-def minmax_volume(data: np.ndarray) -> np.ndarray:
-    data = np.asarray(data, dtype=np.float32)
-    data_min = float(np.nanmin(data))
-    data_max = float(np.nanmax(data))
-    if data_max > data_min:
-        data = (data - data_min) / (data_max - data_min)
-    return data
-
-
 def nifti_to_numpy(file, zscore: bool | None = None):
     """
     Load a NIfTI array for the training pipeline.
 
-    By default applies per-volume z-score for image roots (whole_MRI / whole_Abeta).
+    Applies per-volume z-score for image roots (whole_MRI / whole_Abeta).
     Latent NIfTI under latent_Abeta or latent_MRI are loaded without z-score.
-    Set ILCLDM_NORMALIZE=1 to use min-max instead of z-score on image volumes.
     """
     data = nib.load(file).get_fdata()
     if zscore is None:
         zscore = not is_latent_nifti_root(os.path.dirname(file))
     if zscore:
-        if getattr(config, "normalize_volumes", False):
-            return minmax_volume(data)
         return zscore_volume(data)
     return np.asarray(data, dtype=np.float32)
+
+
+def _latent_files(latent_dir):
+    d = Path(latent_dir)
+    return sorted(list(d.glob("*.nii")) + list(d.glob("*.nii.gz")))
+
+
+def compute_latent_stats(latent_dir):
+    """Global (pooled over all voxels/subjects) mean and std of cached latents."""
+    files = _latent_files(latent_dir)
+    if not files:
+        raise FileNotFoundError(f"No latent NIfTI found in {latent_dir}")
+    total = 0.0
+    total_sq = 0.0
+    count = 0
+    for path in files:
+        arr = np.asarray(nib.load(str(path)).get_fdata(), dtype=np.float64).ravel()
+        total += float(arr.sum())
+        total_sq += float(np.square(arr).sum())
+        count += arr.size
+    mean = total / count
+    var = max(total_sq / count - mean * mean, 0.0)
+    return float(mean), float(np.sqrt(var))
+
+
+_LATENT_STATS_CACHE = {}
+
+
+def _latent_stats_path(latent_dir):
+    if getattr(config, "LATENT_STATS_PATH", ""):
+        return Path(config.LATENT_STATS_PATH)
+    base = Path(str(latent_dir).rstrip("/\\")).name or "latent"
+    return REPO_ROOT / "data_info" / f"latent_stats_{base}.json"
+
+
+def get_latent_stats(latent_dir=None):
+    """Return (mean, std) for stage-2 latent calibration.
+
+    Returns (0.0, 1.0) when calibration is disabled so callers can apply the
+    transform unconditionally. Explicit ILCLDM_LATENT_MEAN/STD take precedence;
+    otherwise stats are read from a cached JSON or computed once from the latent
+    directory and persisted next to data_info/.
+    """
+    if not getattr(config, "LATENT_CALIBRATION", False):
+        return 0.0, 1.0
+    if config.LATENT_MEAN is not None and config.LATENT_STD is not None:
+        std = config.LATENT_STD if config.LATENT_STD > 1e-8 else 1.0
+        return float(config.LATENT_MEAN), float(std)
+
+    latent_dir = latent_dir or config.latent_Abeta
+    key = os.path.abspath(str(latent_dir))
+    if key in _LATENT_STATS_CACHE:
+        return _LATENT_STATS_CACHE[key]
+
+    stats_path = _latent_stats_path(latent_dir)
+    stats = None
+    if stats_path.is_file():
+        try:
+            with open(stats_path) as handle:
+                payload = json.load(handle)
+            stats = (float(payload["mean"]), float(payload["std"]))
+        except Exception:
+            stats = None
+
+    if stats is None:
+        try:
+            mean, std = compute_latent_stats(latent_dir)
+        except FileNotFoundError:
+            print(
+                f"WARNING: latent calibration enabled but no latents in {latent_dir}; "
+                "falling back to identity (mean=0, std=1)."
+            )
+            return 0.0, 1.0
+        if std < 1e-8:
+            std = 1.0
+        stats = (mean, std)
+        try:
+            stats_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(stats_path, "w") as handle:
+                json.dump(
+                    {
+                        "mean": stats[0],
+                        "std": stats[1],
+                        "latent_dir": str(latent_dir),
+                        "n_files": len(_latent_files(latent_dir)),
+                    },
+                    handle,
+                    indent=2,
+                )
+        except Exception:
+            pass
+
+    if stats[1] < 1e-8:
+        stats = (stats[0], 1.0)
+    _LATENT_STATS_CACHE[key] = stats
+    return stats
 
 def random_translation(data1):
     i=np.random.randint(-2,3)

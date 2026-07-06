@@ -184,7 +184,7 @@ def evaluate_reconstruction(model, split, args, out_csv):
     with torch.no_grad():
         for volume, names in tqdm(loader, desc=f"reconstruction:{split}"):
             volume = torch.as_tensor(np.expand_dims(volume, axis=1), dtype=torch.float32, device=config.device)
-            reconstructed = torch.clamp(model(volume), 0, 1)
+            reconstructed = model(volume)
             if tuple(reconstructed.shape[1:]) != (1, 160, 192, 160):
                 raise ValueError(f"Unexpected MRI reconstruction shape: {tuple(reconstructed.shape)}")
             batch_psnr, batch_ssim = batch_metric_scores(volume, reconstructed)

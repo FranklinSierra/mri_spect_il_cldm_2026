@@ -115,7 +115,7 @@ Preprocesado ([`dataset.py`](../dataset.py)):
 
 - Crop fijo `[10:170, 18:210, 10:170]`.
 - Entrenamiento SPECT etapa 1: traslación aleatoria ±2 voxels.
-- Normalización min–max opcional: `ILCLDM_NORMALIZE=1` (por defecto desactivada).
+- Normalización z-score por volumen (única normalización de imagen).
 
 ### 3.5 Estadísticos pendientes (requieren NIfTI montados)
 

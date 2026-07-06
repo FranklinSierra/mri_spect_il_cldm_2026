@@ -20,6 +20,8 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     f1_score,
+    precision_score,
+    recall_score,
     roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
@@ -35,8 +37,8 @@ import config
 from code.roi_mask_utils import try_load_roi_mask_numpy
 from dataset import TwoDataset, resolve_nifti_path
 from main import Diffusion, batch_metric_scores, batch_metric_scores_roi
-from model import AAE, MRIEncoder, UNet
-from utils import load_checkpoint, seed_torch
+from model import AAE, MRIEncoder, UNet, LatentClsHead, build_unet
+from utils import load_checkpoint, load_cls_head_checkpoint, seed_torch
 
 
 def parse_args():
@@ -99,9 +101,14 @@ def task_file_for_split(split):
 
 def checkpoint_paths(exp):
     exp = exp.rstrip("/")
-    exp_dir = Path("result") / exp
+    exp_dir = _RESULT_ROOT / exp
     aae_override = os.getenv("ILCLDM_AAE_CHECKPOINT")
-    checkpoint_aae = Path(aae_override) if aae_override else exp_dir / "AAE.pth.tar"
+    if aae_override:
+        checkpoint_aae = Path(aae_override)
+    elif getattr(config, "CHECKPOINT_AAE", None):
+        checkpoint_aae = Path(config.CHECKPOINT_AAE)
+    else:
+        checkpoint_aae = exp_dir / "AAE.pth.tar"
     return checkpoint_aae, exp_dir / "Unet.pth.tar"
 
 
@@ -180,6 +187,87 @@ def audit_output_dir(exp, run_id):
     return Path("result") / exp.rstrip("/") / "embeddings" / "conditioning_mri" / run_id
 
 
+_REPO_ROOT = Path(__file__).resolve().parent
+_RESULT_ROOT = _REPO_ROOT / "result"
+
+
+def unet_build_config_from_checkpoint(checkpoint_path: str | Path) -> tuple[bool, int]:
+    """Infer ROI channel and input width from a saved UNet checkpoint."""
+    checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    state_dict = checkpoint["state_dict"]
+    in_channels = int(state_dict["downs.0.weight"].shape[1])
+    use_roi_channel = "roi_latent" in state_dict
+    return use_roi_channel, in_channels
+
+
+def unet_build_config_from_manifest(exp):
+    """Infer UNet ROI channel from run_manifest.json (falls back to config/env)."""
+    manifest_path = _RESULT_ROOT / exp.rstrip("/") / "run_manifest.json"
+    use_roi_channel = config.UNET_ROI_CHANNEL
+    if manifest_path.is_file():
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        cfg = manifest.get("config", {})
+        if "UNET_ROI_CHANNEL" in cfg:
+            use_roi_channel = bool(cfg["UNET_ROI_CHANNEL"])
+        elif "UNET_IN_CHANNELS" in cfg:
+            in_channels = int(cfg["UNET_IN_CHANNELS"])
+            return in_channels > 2, in_channels
+    in_channels = 2 + int(use_roi_channel)
+    return use_roi_channel, in_channels
+
+
+def resolve_unet_build_config(
+    exp: str,
+    checkpoint_path: str | Path | None = None,
+) -> tuple[bool, int]:
+    """Build config for UNet loading; checkpoint shapes win over manifest/env."""
+    if checkpoint_path is not None:
+        ckpt_path = Path(checkpoint_path)
+        if ckpt_path.is_file():
+            return unet_build_config_from_checkpoint(ckpt_path)
+    return unet_build_config_from_manifest(exp)
+
+
+def apply_manifest_to_config(exp: str) -> dict | None:
+    """Apply split paths and checkpoints from run_manifest.json to live config."""
+    manifest_path = _RESULT_ROOT / exp.rstrip("/") / "run_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    with open(manifest_path, encoding="utf-8") as f:
+        manifest = json.load(f)
+    env = manifest.get("env_overrides", {})
+    cfg = manifest.get("config", {})
+    env_to_attr = {
+        "ILCLDM_TRAIN_FILE": "train",
+        "ILCLDM_TEST_FILE": "test",
+        "ILCLDM_VALIDATION_FILE": "validation",
+        "ILCLDM_LATENT_ABETA": "latent_Abeta",
+        "ILCLDM_AAE_CHECKPOINT": "CHECKPOINT_AAE",
+        "ILCLDM_MRI_ENCODER_CHECKPOINT": "MRI_ENCODER_CHECKPOINT",
+    }
+    for env_key, attr in env_to_attr.items():
+        value = env.get(env_key) or cfg.get(attr)
+        if value:
+            setattr(config, attr, value)
+    calib = env.get("ILCLDM_LATENT_CALIBRATION")
+    if calib is None and "LATENT_CALIBRATION" in cfg:
+        calib = cfg["LATENT_CALIBRATION"]
+    if calib is not None:
+        config.LATENT_CALIBRATION = calib if isinstance(calib, bool) else str(calib) == "1"
+    return manifest
+
+
+def load_cls_head_for_exp(exp: str, device) -> LatentClsHead | None:
+    path = _RESULT_ROOT / exp.rstrip("/") / "ClsHead.pth.tar"
+    if not path.is_file():
+        return None
+    head = LatentClsHead().to(device)
+    load_cls_head_checkpoint(head, path)
+    head.eval()
+    return head
+
+
 def load_models(exp, device):
     checkpoint_aae, checkpoint_unet = checkpoint_paths(exp)
     if not checkpoint_aae.exists():
@@ -190,7 +278,8 @@ def load_models(exp, device):
     aae = AAE().to(device).eval()
     load_checkpoint(str(checkpoint_aae), aae, None, config.learning_rate)
 
-    unet = UNet().to(device).eval()
+    use_roi_channel, in_channels = resolve_unet_build_config(exp, checkpoint_unet)
+    unet = build_unet(in_channel=in_channels, use_roi_channel=use_roi_channel).to(device).eval()
     load_checkpoint(str(checkpoint_unet), unet, None, config.learning_rate)
 
     return aae, unet, checkpoint_aae, checkpoint_unet
@@ -755,10 +844,7 @@ def build_loader(split, batch_size, max_subjects=None):
 
 def decode_spect(aae, sampled_latent):
     with torch.no_grad():
-        decoded = aae.decoder(sampled_latent)
-        if config.normalize_volumes:
-            return torch.clamp(decoded, 0, 1)
-        return decoded
+        return aae.decoder(sampled_latent)
 
 
 def save_subject_representation(out_dir, split, subject_id, label, sampled_latent, synthetic_spect=None):
@@ -1059,6 +1145,8 @@ def metric_row(model_name, y_true, y_pred, y_score=None, **params):
         "model": model_name,
         "accuracy": accuracy_score(y_true, y_pred),
         "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, zero_division=0),
+        "recall": recall_score(y_true, y_pred, zero_division=0),
         "f1": f1_score(y_true, y_pred),
         "roc_auc": roc_auc_score(y_true, y_score) if y_score is not None and len(np.unique(y_true)) == 2 else np.nan,
     }
@@ -1141,6 +1229,9 @@ def main():
         args.splits = ["train"] if args.run_conditioning_audit else ["train", "test"]
     seed_torch(args.seed)
     device = config.device
+    manifest = apply_manifest_to_config(args.exp)
+    if manifest is not None:
+        print(f"Applied run_manifest paths for {args.exp}")
     print(f"Device: {device}")
     aae, unet, checkpoint_aae, checkpoint_unet = load_models(args.exp, device)
 
@@ -1158,6 +1249,10 @@ def main():
     print(f"MRI encoder mode: {mri_encoder_mode}")
     if mri_encoder_ckpt_resolved is not None:
         print(f"MRI encoder checkpoint: {mri_encoder_ckpt_resolved}")
+
+    cls_head = load_cls_head_for_exp(args.exp, device)
+    if cls_head is not None:
+        print("Loaded ClsHead.pth.tar for inference")
 
     if args.run_conditioning_audit:
         out_dir, decision = run_conditioning_audit(args, unet, device)

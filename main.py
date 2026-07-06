@@ -16,10 +16,18 @@ from tqdm import tqdm
 
 import config
 from code.roi_mask_utils import try_load_roi_mask_numpy, try_load_roi_mask_tensor
-from dataset import OneDataset, TwoDataset
+from dataset import OneDataset, TwoDataset, get_latent_stats
 from losses import spect_reconstruction_loss
-from model import AAE, Discriminator, EMA, MRIEncoder, UNet
-from utils import load_checkpoint, save_checkpoint, seed_torch, dump_run_manifest
+from model import AAE, Discriminator, EMA, MRIEncoder, UNet, LatentClsHead, build_unet
+from utils import (
+    load_checkpoint,
+    load_cls_head_checkpoint,
+    load_unet_init_checkpoint,
+    save_checkpoint,
+    save_cls_head_checkpoint,
+    seed_torch,
+    dump_run_manifest,
+)
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -35,18 +43,13 @@ def to_numpy_float(data):
 
 def metric_data_range(target) -> float:
     """Dynamic range for PSNR/SSIM (z-score volumes need percentiles, not [0,1])."""
-    if config.normalize_volumes:
-        return 1.0
     target = to_numpy_float(target)
     low, high = np.percentile(target, [1.0, 99.0])
     return float(max(high - low, 1e-6))
 
 
 def prepare_prediction_for_metrics(prediction):
-    prediction = to_numpy_float(prediction)
-    if config.normalize_volumes:
-        return np.clip(prediction, 0.0, 1.0)
-    return prediction
+    return to_numpy_float(prediction)
 
 
 def batch_metric_scores(target, prediction):
@@ -114,17 +117,33 @@ def reconstruction_training_loss(target, prediction):
     return torch.abs(target - prediction).mean()
 
 class Diffusion:
-    def __init__(self, noise_steps=None, beta_start=0.0001, beta_end=0.0200, schedule="cosine"):
+    def __init__(self, noise_steps=None, beta_start=0.0001, beta_end=0.0200, schedule="cosine",
+                 latent_dir=None, cosine_s=0.008):
         if noise_steps is None:
             noise_steps = config.noiseSteps
         self.noise_steps = noise_steps
         self.beta_start = beta_start
         self.beta_end = beta_end
         self.schedule = schedule
+        self.cosine_s = cosine_s
 
         self.beta = self.prepare_noise_schedule().to(config.device)
         self.alpha = 1. - self.beta
         self.alpha_hat = torch.cumprod(self.alpha, dim=0)
+
+        # Latent calibration stats: diffuse in (z - mean) / std, invert before decode.
+        # (0.0, 1.0) when calibration is disabled -> transforms become identity.
+        self.latent_mean, self.latent_std = get_latent_stats(latent_dir)
+        if self.latent_std < 1e-8:
+            self.latent_std = 1.0
+
+    def normalize_latent(self, z):
+        """Map a raw AAE latent into the calibrated diffusion space."""
+        return (z - self.latent_mean) / self.latent_std
+
+    def denormalize_latent(self, z):
+        """Map a calibrated latent back to the raw AAE space (what the decoder expects)."""
+        return z * self.latent_std + self.latent_mean
 
     def prepare_noise_schedule(self):
         if self.schedule == "linear":
@@ -133,7 +152,7 @@ class Diffusion:
         if self.schedule != "cosine":
             raise ValueError(f"Unknown diffusion noise schedule: {self.schedule}")
 
-        s = 0.008
+        s = self.cosine_s
         steps = self.noise_steps + 1
         x = torch.linspace(0, self.noise_steps, steps)
         alpha_hat = torch.cos(((x / self.noise_steps) + s) / (1 + s) * torch.pi * 0.5) ** 2
@@ -203,7 +222,8 @@ class Diffusion:
                 direction = torch.sqrt(torch.clamp(1 - alpha_hat_prev - sigma ** 2, min=0)) * predicted_noise
                 noise = sigma * torch.randn_like(x) if eta > 0 else 0
                 x = torch.sqrt(alpha_hat_prev) * pred_x0 + direction + noise
-        return x
+        # Diffusion runs in calibrated space (prior ~ N(0,1)); return raw-space latent.
+        return self.denormalize_latent(x)
 
 def evaluate_ldm_split(
     diffusion,
@@ -465,6 +485,64 @@ def encode_mri_embeddings():
     for task_file in (config.train, config.validation, config.test):
         encode_dataset(config.whole_MRI, config.MRI_ENCODER_CHECKPOINT, config.latent_MRI, task_file)
 
+
+def evaluate_cls_balanced_accuracy(diffusion, ema_unet, aae_model, mri_encoder, cls_head, task_file, stage):
+    """One-step x0_hat classification accuracy on a split (validation/test).
+
+    Uses whole_Abeta volumes and encodes latents on the fly with the frozen AAE,
+    because pre-encoded files in latent_Abeta/ exist only for train subjects.
+    """
+    cls_head.eval()
+    aae_model.eval()
+    dataset = TwoDataset(
+        root_MRI=config.whole_MRI,
+        root_Abeta=config.whole_Abeta,
+        task=task_file,
+        stage=stage,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.numworker,
+        pin_memory=True,
+    )
+    y_true = []
+    y_pred = []
+    use_biased_timesteps = config.HIGH_T_SAMPLE_PROB > 0
+
+    with torch.no_grad():
+        for MRI, Abeta, _name, label in tqdm(loader, leave=True):
+            MRI = torch.tensor(np.expand_dims(MRI, axis=1), device=config.device, dtype=torch.float32)
+            Abeta_tensor = torch.tensor(
+                np.expand_dims(Abeta, axis=1), device=config.device, dtype=torch.float32
+            )
+            latent_Abeta = aae_model.encoder(Abeta_tensor)
+            latent_Abeta = diffusion.normalize_latent(latent_Abeta)
+            label = label.to(config.device).reshape(-1).long()
+            if use_biased_timesteps:
+                t = diffusion.sample_timesteps_biased(latent_Abeta.shape[0]).to(config.device)
+            else:
+                t = diffusion.sample_timesteps(latent_Abeta.shape[0]).to(config.device)
+            x_t, noise = diffusion.noise_images(latent_Abeta, t)
+            if mri_encoder is not None:
+                MRI_cond = mri_encoder(MRI)
+                predicted_noise = ema_unet(x_t, MRI_cond, t, None, precomputed_condition=True)
+            else:
+                predicted_noise = ema_unet(x_t, MRI, t, None)
+            x0_hat = diffusion.predict_x0(x_t, t, predicted_noise)
+            logits = cls_head(x0_hat)
+            pred = (torch.sigmoid(logits) >= 0.5).long()
+            y_true.extend(label.detach().cpu().numpy().tolist())
+            y_pred.extend(pred.detach().cpu().numpy().tolist())
+
+    if not y_true:
+        return 0.0
+    from sklearn.metrics import balanced_accuracy_score
+
+    return float(balanced_accuracy_score(y_true, y_pred))
+
+
 # Second stage
 def train_LDM():
     result_dir = build_result_dir()
@@ -503,7 +581,13 @@ def train_LDM():
             mri_encoder.requires_grad_(True)
             mri_encoder_trainable = True
 
-    Unet = UNet().to(config.device)
+    Unet = build_unet().to(config.device)
+    if config.UNET_INIT_CHECKPOINT:
+        load_unet_init_checkpoint(Unet, config.UNET_INIT_CHECKPOINT)
+    cls_head = None
+    use_cls_loss = config.CLS_LOSS
+    if use_cls_loss:
+        cls_head = LatentClsHead().to(config.device)
     optimizer_groups = [{"params": [p for p in Unet.parameters() if p.requires_grad], "lr": config.learning_rate}]
     if mri_encoder_trainable:
         optimizer_groups.append(
@@ -511,6 +595,10 @@ def train_LDM():
                 "params": [p for p in mri_encoder.parameters() if p.requires_grad],
                 "lr": config.learning_rate * config.MRI_ENCODER_FINETUNE_LR_SCALE,
             }
+        )
+    if cls_head is not None:
+        optimizer_groups.append(
+            {"params": [p for p in cls_head.parameters() if p.requires_grad], "lr": config.learning_rate}
         )
     opt_Unet = optim.AdamW(optimizer_groups)
     use_data_parallel = config.device == "cuda" and torch.cuda.is_available() and len(gpus) > 1
@@ -523,6 +611,7 @@ def train_LDM():
     diffusion = Diffusion()
     best_validation_score = 0.0
     best_latent_mse = float("inf")
+    best_bal_acc = 0.0
     validations_without_improvement = 0
 
     use_aux_image = config.AUX_IMAGE_LOSS
@@ -531,16 +620,21 @@ def train_LDM():
     roi_mask_tensor = try_load_roi_mask_tensor(config.device)
     roi_mask_np = try_load_roi_mask_numpy()
     use_biased_timesteps = config.HIGH_T_SAMPLE_PROB > 0
+    cls_criterion = None
+    if use_cls_loss and cls_head is not None:
+        cls_criterion = nn.BCEWithLogitsLoss()
 
     for epoch in range(config.epochs):
         lossfile = open(result_dir / "loss_curve.csv", 'a+', newline='')
         writer = csv.writer(lossfile)
-        if epoch == 0:
+        if lossfile.tell() == 0:
             header = ["Epoch", "MSE_loss"]
             if use_aux_image:
                 header.append("aux_image_loss")
             if use_latent_loss:
                 header.append("latent_loss")
+            if use_cls_loss:
+                header.append("cls_loss")
             writer.writerow(header)
         
         dataset = TwoDataset(
@@ -560,6 +654,8 @@ def train_LDM():
         aux_steps = 0
         latent_loss_epoch = 0
         latent_steps = 0
+        cls_loss_epoch = 0
+        cls_steps = 0
 
         for idx, batch in enumerate(loop):
             if use_aux_image:
@@ -568,10 +664,13 @@ def train_LDM():
                 MRI, latent_Abeta, name, label = batch
 
             label = label.to(config.device)
+            train_label = label if config.USE_TRAIN_LABEL else None
             MRI = torch.tensor(np.expand_dims(MRI, axis=1), device=config.device, dtype=torch.float32)
             latent_Abeta = torch.tensor(
                 np.expand_dims(latent_Abeta, axis=1), device=config.device, dtype=torch.float32
             )
+            # Calibrate cached raw latent into diffusion space (identity if disabled).
+            latent_Abeta = diffusion.normalize_latent(latent_Abeta)
 
             if use_biased_timesteps:
                 t = diffusion.sample_timesteps_biased(latent_Abeta.shape[0]).to(config.device)
@@ -584,9 +683,9 @@ def train_LDM():
                 else:
                     with torch.no_grad():
                         MRI_cond = mri_encoder(MRI)
-                predicted_noise = Unet(x_t, MRI_cond, t, label, precomputed_condition=True)
+                predicted_noise = Unet(x_t, MRI_cond, t, train_label, precomputed_condition=True)
             else:
-                predicted_noise = Unet(x_t, MRI, t, label)
+                predicted_noise = Unet(x_t, MRI, t, train_label)
             loss = L2(predicted_noise, noise)
 
             high_t_batch = (t > config.HIGH_T_THRESHOLD).all().item()
@@ -594,7 +693,7 @@ def train_LDM():
                 high_t_batch
                 or (global_step % config.AUX_IMAGE_EVERY_N == 0)
             )
-            need_x0_hat = use_latent_loss or apply_aux
+            need_x0_hat = use_latent_loss or apply_aux or use_cls_loss
             x0_hat = diffusion.predict_x0(x_t, t, predicted_noise) if need_x0_hat else None
 
             if use_latent_loss:
@@ -604,7 +703,7 @@ def train_LDM():
                 latent_steps += 1
 
             if apply_aux:
-                spect_pred = model.decoder(x0_hat)
+                spect_pred = model.decoder(diffusion.denormalize_latent(x0_hat))
                 spect_gt = torch.tensor(
                     np.expand_dims(spect_volume, axis=1), device=config.device, dtype=torch.float32
                 )
@@ -624,6 +723,14 @@ def train_LDM():
                 aux_loss_epoch += aux_loss.detach()
                 aux_steps += 1
 
+            if use_cls_loss and cls_head is not None and x0_hat is not None:
+                label_flat = label.reshape(-1).float()
+                cls_logits = cls_head(x0_hat)
+                cls_loss = cls_criterion(cls_logits, label_flat)
+                loss = loss + config.CLS_LOSS_LAMBDA * cls_loss
+                cls_loss_epoch += cls_loss.detach()
+                cls_steps += 1
+
             opt_Unet.zero_grad()
             loss.backward()
             opt_Unet.step()
@@ -637,6 +744,8 @@ def train_LDM():
             row.append((aux_loss_epoch / max(aux_steps, 1)).item())
         if use_latent_loss:
             row.append((latent_loss_epoch / max(latent_steps, 1)).item())
+        if use_cls_loss:
+            row.append((cls_loss_epoch / max(cls_steps, 1)).item())
         writer.writerow(row)
         lossfile.close()
 
@@ -680,7 +789,29 @@ def train_LDM():
         ])
         latent_csv.close()
 
-        if config.EARLY_STOP_LATENT_METRIC:
+        cls_bal_acc = None
+        if cls_head is not None and (config.EARLY_STOP_CLS_METRIC or use_cls_loss):
+            cls_bal_acc = evaluate_cls_balanced_accuracy(
+                diffusion,
+                ema_Unet,
+                model,
+                mri_encoder,
+                cls_head,
+                config.validation,
+                "validation",
+            )
+            cls_csv = open(result_dir / "validation_cls.csv", "a+", newline="")
+            cls_writer = csv.writer(cls_csv)
+            if cls_csv.tell() == 0:
+                cls_writer.writerow(["Epoch", "balanced_accuracy"])
+            cls_writer.writerow([epoch + 1, cls_bal_acc])
+            cls_csv.close()
+
+        if config.EARLY_STOP_CLS_METRIC:
+            improved = cls_bal_acc is not None and cls_bal_acc > best_bal_acc
+            if improved:
+                best_bal_acc = cls_bal_acc
+        elif config.EARLY_STOP_LATENT_METRIC:
             # Explicit criterion: lower latent MSE is better.
             improved = val_metrics["latent_mse"] < best_latent_mse
             if improved:
@@ -695,6 +826,8 @@ def train_LDM():
         if improved:
             validations_without_improvement = 0
             save_checkpoint(ema_Unet, opt_Unet, filename=config.CHECKPOINT_Unet)
+            if cls_head is not None:
+                save_cls_head_checkpoint(cls_head, result_dir / "ClsHead.pth.tar")
             if mode == "finetune" and mri_encoder is not None:
                 finetuned_encoder_path = result_dir / "MRI_Encoder_finetuned.pth.tar"
                 save_checkpoint(mri_encoder, None, filename=str(finetuned_encoder_path))

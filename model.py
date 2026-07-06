@@ -343,9 +343,15 @@ class UNet(nn.Module):
         self.cond = DiffusionConditioner()
         self.label_emb = nn.Embedding(config.num_classes, time_dim)
     
+    def _concat_inputs(self, x, cond):
+        if hasattr(self, "roi_latent"):
+            roi = self.roi_latent.expand(x.shape[0], -1, -1, -1, -1)
+            return torch.cat([x, cond, roi], dim=1)
+        return torch.cat([x, cond], dim=1)
+
     def forward(self, x, y, time, label=None, precomputed_condition=False):
         cond = y if precomputed_condition else self.cond(y)
-        x = torch.cat([x,cond],dim=1)
+        x = self._concat_inputs(x, cond)
         feats = []
 
         t = self.time_mlp(time) if exists(self.time_mlp) else None
@@ -390,6 +396,46 @@ class DiffusionConditioner(nn.Module):
 
     def forward(self, x):
         return self.layers(x)
+
+
+LATENT_GRID_SHAPE = (40, 48, 40)
+LATENT_FLAT_DIM = 40 * 48 * 40
+
+
+class LatentClsHead(nn.Module):
+    """Binary classifier on flattened predicted latent x0_hat (B, 1, 40, 48, 40)."""
+
+    def __init__(self, input_dim: int = LATENT_FLAT_DIM):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(0.35),
+            nn.Linear(128, 32),
+            nn.ReLU(),
+            nn.Dropout(0.35),
+            nn.Linear(32, 1),
+        )
+
+    def forward(self, x0_hat: torch.Tensor) -> torch.Tensor:
+        batch = x0_hat.shape[0]
+        flat = x0_hat.reshape(batch, -1)
+        return self.net(flat).squeeze(1)
+
+
+def build_unet(in_channel=None, use_roi_channel=None):
+    """Construct UNet; opt-in ROI input channel via ILCLDM_UNET_ROI_CHANNEL."""
+    if use_roi_channel is None:
+        use_roi_channel = config.UNET_ROI_CHANNEL
+    if in_channel is None:
+        in_channel = 2 + int(use_roi_channel)
+    net = UNet(in_channel=in_channel)
+    if use_roi_channel:
+        from code.roi_mask_utils import load_roi_latent_buffer
+
+        net.register_buffer("roi_latent", load_roi_latent_buffer())
+    return net
+
 
 class EMA:
     def __init__(self, beta):

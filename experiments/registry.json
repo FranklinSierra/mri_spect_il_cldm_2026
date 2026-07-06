@@ -5,11 +5,62 @@
     "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect/AAE.pth.tar",
     "ILCLDM_EARLY_STOP_LATENT_METRIC": "0"
   },
+  "base_hight05": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
+    "ILCLDM_HIGH_T_SAMPLE_PROB": "0.5",
+    "ILCLDM_HIGH_T_THRESHOLD": "700"
+  },
+  "base_roi3ch": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
+    "ILCLDM_HIGH_T_SAMPLE_PROB": "0.5",
+    "ILCLDM_HIGH_T_THRESHOLD": "700",
+    "ILCLDM_UNET_ROI_CHANNEL": "1"
+  },
+  "base_calib_roi3ch_uni": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
+    "ILCLDM_LATENT_CALIBRATION": "1",
+    "ILCLDM_HIGH_T_SAMPLE_PROB": "0",
+    "ILCLDM_HIGH_T_THRESHOLD": "700",
+    "ILCLDM_UNET_ROI_CHANNEL": "1",
+    "ILCLDM_USE_TRAIN_LABEL": "1"
+  },
+  "base_frozen_nhy": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri_nhy_v1/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect_nhy_v1/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
+    "ILCLDM_TRAIN_FILE": "data_info/splits/nhy_v1/train.txt",
+    "ILCLDM_TEST_FILE": "data_info/splits/nhy_v1/test.txt",
+    "ILCLDM_VALIDATION_FILE": "data_info/splits/nhy_v1/validation.txt",
+    "ILCLDM_LATENT_ABETA": "data/latent_Abeta_nhy_v1/"
+  },
+  "base_hight05_nhy": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri_nhy_v1/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect_nhy_v1/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
+    "ILCLDM_HIGH_T_SAMPLE_PROB": "0.5",
+    "ILCLDM_HIGH_T_THRESHOLD": "700",
+    "ILCLDM_TRAIN_FILE": "data_info/splits/nhy_v1/train.txt",
+    "ILCLDM_TEST_FILE": "data_info/splits/nhy_v1/test.txt",
+    "ILCLDM_VALIDATION_FILE": "data_info/splits/nhy_v1/validation.txt",
+    "ILCLDM_LATENT_ABETA": "data/latent_Abeta_nhy_v1/"
+  },
   "experiments": {
     "frozen_v1": {
       "exp": "exp_nm_s2_mri_frozen",
       "run_id": "nm_stage2_v1",
       "label": "Frozen v1 (baseline)",
+      "short_label": "v1",
       "early_stop": "image",
       "base": null,
       "overrides": {}
@@ -18,6 +69,7 @@
       "exp": "exp_nm_s2_mri_frozen_v2",
       "run_id": "nm_stage2_v2",
       "label": "Frozen v2 (historico)",
+      "short_label": "v2",
       "early_stop": "latent",
       "base": null,
       "overrides": {}
@@ -26,6 +78,7 @@
       "exp": "exp_nm_s2_frozen_abl_latloss02",
       "run_id": "abl_latloss02",
       "label": "Abl: latent loss 0.2",
+      "short_label": "latloss02",
       "early_stop": "image",
       "base": "base_frozen",
       "overrides": {
@@ -37,6 +90,7 @@
       "exp": "exp_nm_s2_frozen_abl_hight05",
       "run_id": "abl_hight05",
       "label": "Abl: high-t sampling 0.5",
+      "short_label": "hight05",
       "early_stop": "image",
       "base": "base_frozen",
       "overrides": {
@@ -48,12 +102,176 @@
       "exp": "exp_nm_s2_frozen_abl_auxfreq5",
       "run_id": "abl_auxfreq5",
       "label": "Abl: aux image cada 5",
+      "short_label": "auxfreq5",
       "early_stop": "image",
       "base": "base_frozen",
       "overrides": {
         "ILCLDM_AUX_IMAGE_LOSS": "1",
         "ILCLDM_AUX_IMAGE_EVERY_N": "5",
         "ILCLDM_AUX_IMAGE_LAMBDA": "0.25"
+      }
+    },
+    "h05_ht08": {
+      "exp": "exp_nm_s2_frozen_h05_ht08",
+      "run_id": "h05_ht08",
+      "label": "hight05 warm-start + high-t 80%",
+      "short_label": "h05_ht08",
+      "early_stop": "image",
+      "base": "base_hight05",
+      "parent": "abl_hight05",
+      "init_checkpoint": "result/exp_nm_s2_frozen_abl_hight05/Unet.pth.tar",
+      "overrides": {
+        "ILCLDM_HIGH_T_SAMPLE_PROB": "0.8"
+      }
+    },
+    "h05_roi3ch": {
+      "exp": "exp_nm_s2_frozen_h05_roi3ch",
+      "run_id": "h05_roi3ch",
+      "label": "hight05 warm-start + ROI 3er canal",
+      "short_label": "h05_roi3ch",
+      "early_stop": "image",
+      "base": "base_hight05",
+      "parent": "abl_hight05",
+      "init_checkpoint": "result/exp_nm_s2_frozen_abl_hight05/Unet.pth.tar",
+      "overrides": {
+        "ILCLDM_UNET_ROI_CHANNEL": "1"
+      }
+    },
+    "h05_nolabel": {
+      "exp": "exp_nm_s2_frozen_h05_nolabel",
+      "run_id": "h05_nolabel",
+      "label": "hight05 warm-start sin label en train",
+      "short_label": "h05_nolabel",
+      "early_stop": "image",
+      "base": "base_hight05",
+      "parent": "abl_hight05",
+      "init_checkpoint": "result/exp_nm_s2_frozen_abl_hight05/Unet.pth.tar",
+      "overrides": {
+        "ILCLDM_USE_TRAIN_LABEL": "0"
+      }
+    },
+    "h05_aux5": {
+      "exp": "exp_nm_s2_frozen_h05_aux5",
+      "run_id": "h05_aux5",
+      "label": "hight05 warm-start + aux image cada 5",
+      "short_label": "h05_aux5",
+      "early_stop": "image",
+      "base": "base_hight05",
+      "parent": "abl_hight05",
+      "init_checkpoint": "result/exp_nm_s2_frozen_abl_hight05/Unet.pth.tar",
+      "overrides": {
+        "ILCLDM_AUX_IMAGE_LOSS": "1",
+        "ILCLDM_AUX_IMAGE_EVERY_N": "5",
+        "ILCLDM_AUX_IMAGE_LAMBDA": "0.25"
+      }
+    },
+    "abl_hight05_nhy": {
+      "exp": "exp_nm_s2_frozen_abl_hight05_nhy",
+      "run_id": "abl_hight05_nhy",
+      "label": "NHY split: high-t sampling 0.5 (scratch)",
+      "short_label": "abl_hight05_nhy",
+      "split_profile": "nhy_v1",
+      "early_stop": "image",
+      "base": "base_frozen_nhy",
+      "prerequisite": "E1 SPECT exp_nm_s1_spect_nhy_v1 + E1 MRI exp_nm_s1_mri_nhy_v1 before run_ablation",
+      "overrides": {
+        "ILCLDM_HIGH_T_SAMPLE_PROB": "0.5",
+        "ILCLDM_HIGH_T_THRESHOLD": "700"
+      }
+    },
+    "h05_roi3ch_nhy": {
+      "exp": "exp_nm_s2_frozen_h05_roi3ch_nhy",
+      "run_id": "h05_roi3ch_nhy",
+      "label": "NHY split: hight05 warm-start + ROI 3er canal",
+      "short_label": "h05_roi3ch_nhy",
+      "split_profile": "nhy_v1",
+      "early_stop": "image",
+      "base": "base_hight05_nhy",
+      "parent": "abl_hight05_nhy",
+      "init_checkpoint": "result/exp_nm_s2_frozen_abl_hight05_nhy/Unet.pth.tar",
+      "prerequisite": "abl_hight05_nhy checkpoint before run_ablation",
+      "overrides": {
+        "ILCLDM_UNET_ROI_CHANNEL": "1"
+      }
+    },
+    "roi3ch_nhy": {
+      "exp": "exp_nm_s2_frozen_roi3ch_nhy",
+      "run_id": "roi3ch_nhy",
+      "label": "roi3ch pipeline NHY split (E1+E2+E3, no warm-start)",
+      "short_label": "roi3ch_nhy",
+      "split_profile": "nhy_v1",
+      "early_stop": "image",
+      "base": "base_hight05_nhy",
+      "prerequisite": "E1 SPECT exp_nm_s1_spect_nhy_v1 + E1 MRI exp_nm_s1_mri_nhy_v1 before run_ablation",
+      "overrides": {
+        "ILCLDM_UNET_ROI_CHANNEL": "1"
+      }
+    },
+    "roi3ch_nolabel": {
+      "exp": "exp_nm_s2_frozen_roi3ch_nolabel",
+      "run_id": "roi3ch_nolabel",
+      "label": "roi3ch warm-start sin label en train",
+      "short_label": "roi3ch_nolabel",
+      "early_stop": "image",
+      "base": "base_roi3ch",
+      "parent": "h05_roi3ch",
+      "init_checkpoint": "result/exp_nm_s2_frozen_h05_roi3ch/Unet.pth.tar",
+      "overrides": {
+        "ILCLDM_USE_TRAIN_LABEL": "0"
+      }
+    },
+    "roi3ch_ht08": {
+      "exp": "exp_nm_s2_frozen_roi3ch_ht08",
+      "run_id": "roi3ch_ht08",
+      "label": "roi3ch warm-start + high-t 80%",
+      "short_label": "roi3ch_ht08",
+      "early_stop": "image",
+      "base": "base_roi3ch",
+      "parent": "h05_roi3ch",
+      "init_checkpoint": "result/exp_nm_s2_frozen_h05_roi3ch/Unet.pth.tar",
+      "overrides": {
+        "ILCLDM_HIGH_T_SAMPLE_PROB": "0.8"
+      }
+    },
+    "roi3ch_cls": {
+      "exp": "exp_nm_s2_frozen_roi3ch_cls",
+      "run_id": "roi3ch_cls",
+      "label": "roi3ch warm-start + cls loss x0_hat",
+      "short_label": "roi3ch_cls",
+      "early_stop": "cls",
+      "base": "base_roi3ch",
+      "parent": "h05_roi3ch",
+      "init_checkpoint": "result/exp_nm_s2_frozen_h05_roi3ch/Unet.pth.tar",
+      "overrides": {
+        "ILCLDM_CLS_LOSS": "1",
+        "ILCLDM_CLS_LOSS_LAMBDA": "0.1",
+        "ILCLDM_EARLY_STOP_CLS_METRIC": "1",
+        "ILCLDM_USE_TRAIN_LABEL": "0"
+      }
+    },
+    "calib_roi3ch_uni": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni",
+      "run_id": "calib_roi3ch_uni",
+      "label": "Latent calib + ROI 3ch + uniform t (frozen E1, scratch UNet)",
+      "short_label": "calib_roi3ch_uni",
+      "early_stop": "image",
+      "base": "base_calib_roi3ch_uni",
+      "prerequisite": "E1 SPECT exp_nm_s1_spect + E1 MRI exp_nm_s1_mri; latentes en data/latent_Abeta/ (sin re-encode)",
+      "overrides": {}
+    },
+    "h05_calib_roi3ch": {
+      "exp": "exp_nm_s2_frozen_h05_calib_roi3ch",
+      "run_id": "h05_calib_roi3ch",
+      "label": "calib warm-start + high-t 0.5 + ROI 3ch",
+      "short_label": "h05_calib_roi3ch",
+      "early_stop": "image",
+      "base": "base_calib_roi3ch_uni",
+      "parent": "calib_roi3ch_uni",
+      "init_checkpoint": "result/exp_nm_s2_frozen_calib_roi3ch_uni/Unet.pth.tar",
+      "prerequisite": "calib_roi3ch_uni checkpoint (Unet.pth.tar) before run_ablation",
+      "overrides": {
+        "ILCLDM_HIGH_T_SAMPLE_PROB": "0.5",
+        "ILCLDM_HIGH_T_THRESHOLD": "700"
       }
     }
   }

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pandas as pd
@@ -34,16 +35,44 @@ def check_split(split_name: str, ids: list[str], present: set[str]) -> list[str]
     return missing
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--train-file",
+        type=Path,
+        default=ROOT / "data_info" / "train.txt",
+        help="Train ID list (default: primary split).",
+    )
+    parser.add_argument(
+        "--validation-file",
+        type=Path,
+        default=ROOT / "data_info" / "validation.txt",
+    )
+    parser.add_argument(
+        "--test-file",
+        type=Path,
+        default=ROOT / "data_info" / "test.txt",
+    )
+    parser.add_argument(
+        "--latent-dir",
+        type=Path,
+        default=ROOT / "data" / "latent_Abeta",
+        help="Optional latent cache directory to count.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
     data_root = ROOT / "data"
     info_root = ROOT / "data_info"
 
     present = present_ids(data_root)
     print(f"Data IDs in data/whole_MRI: {len(present)}")
 
-    train_ids = read_ids(info_root / "train.txt")
-    val_ids = read_ids(info_root / "validation.txt")
-    test_ids = read_ids(info_root / "test.txt")
+    train_ids = read_ids(args.train_file)
+    val_ids = read_ids(args.validation_file)
+    test_ids = read_ids(args.test_file)
 
     missing = []
     missing += check_split("train", train_ids, present)
@@ -57,12 +86,13 @@ def main() -> int:
     if diff_csv:
         print(f"  missing data_info IDs: {diff_csv}")
 
-    latent_abeta_count = len(list((data_root / "latent_Abeta").glob("*.nii*")))
+    latent_dir = args.latent_dir
+    latent_count = len(list(latent_dir.glob("*.nii*"))) if latent_dir.is_dir() else 0
     latent_mri_count = len(list((data_root / "latent_MRI").glob("*.nii*")))
-    print(f"latent_Abeta files: {latent_abeta_count}")
+    print(f"latent dir {latent_dir}: {latent_count} files")
     print(f"latent_MRI files: {latent_mri_count}")
-    if latent_abeta_count == 0:
-        print("WARNING: latent_Abeta is empty (expected before running stage 1 SPECT + encoding).")
+    if latent_count == 0:
+        print(f"WARNING: {latent_dir} is empty (expected before E1 encoding).")
     if latent_mri_count == 0:
         print("INFO: latent_MRI is empty (normal unless MRI embeddings have been encoded).")
 

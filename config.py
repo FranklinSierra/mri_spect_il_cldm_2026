@@ -15,8 +15,6 @@ early_stopping_patience = int(os.getenv("ILCLDM_EARLY_STOPPING_PATIENCE", "10"))
 time_dim = 128
 num_classes = 2
 Lambda = 100
-# ILCLDM_NORMALIZE=1 -> min-max on load instead of per-volume z-score (image volumes only)
-normalize_volumes = os.getenv("ILCLDM_NORMALIZE", "0") == "1"
 
 # Stage-1 / image-space SPECT losses (z-score aware)
 USE_WEIGHTED_RECON_LOSS = os.getenv("ILCLDM_USE_WEIGHTED_RECON", "1") == "1"
@@ -38,6 +36,17 @@ LATENT_LOSS_LAMBDA = float(os.getenv("ILCLDM_LATENT_LOSS_LAMBDA", "0.5"))
 HIGH_T_SAMPLE_PROB = float(os.getenv("ILCLDM_HIGH_T_SAMPLE_PROB", "0"))
 HIGH_T_THRESHOLD = int(os.getenv("ILCLDM_HIGH_T_THRESHOLD", "700"))
 
+# Stage-2 latent calibration: diffuse in z' = (z - mean) / std, invert before the
+# decoder so the AAE receives latents in its original (raw) space. Stats are the
+# global mean/std over the train SPECT latents (config.latent_Abeta). Set
+# ILCLDM_LATENT_MEAN / ILCLDM_LATENT_STD to pin explicit values.
+LATENT_CALIBRATION = os.getenv("ILCLDM_LATENT_CALIBRATION", "1") == "1"
+_env_latent_mean = os.getenv("ILCLDM_LATENT_MEAN", "").strip()
+_env_latent_std = os.getenv("ILCLDM_LATENT_STD", "").strip()
+LATENT_MEAN = float(_env_latent_mean) if _env_latent_mean else None
+LATENT_STD = float(_env_latent_std) if _env_latent_std else None
+LATENT_STATS_PATH = os.getenv("ILCLDM_LATENT_STATS_PATH", "").strip()
+
 # Stage-2 v2: ROI-weighted aux loss (basal ganglia mask, same crop as volumes)
 ROI_MASK_PATH = os.getenv("ILCLDM_ROI_MASK_PATH", "data/mask_basal_ganglia.nii.gz")
 ROI_WEIGHT_ALPHA = float(os.getenv("ILCLDM_ROI_WEIGHT_ALPHA", "3.0"))
@@ -46,9 +55,22 @@ USE_ROI_LOSS = os.getenv("ILCLDM_USE_ROI_LOSS", "0") == "1"
 # Stage-2 v2: early stopping on validation latent MSE (else legacy PSNR+SSIM*10)
 EARLY_STOP_LATENT_METRIC = os.getenv("ILCLDM_EARLY_STOP_LATENT_METRIC", "0") == "1"
 
+# Stage-2 h05 wave: training/inference options
+USE_TRAIN_LABEL = os.getenv("ILCLDM_USE_TRAIN_LABEL", "1") == "1"
+UNET_ROI_CHANNEL = os.getenv("ILCLDM_UNET_ROI_CHANNEL", "0") == "1"
+UNET_IN_CHANNELS = 2 + int(UNET_ROI_CHANNEL)
+UNET_INIT_CHECKPOINT = os.getenv("ILCLDM_UNET_INIT_CHECKPOINT", "").strip()
+REGISTRY_KEY = os.getenv("ILCLDM_REGISTRY_KEY", "").strip()
+PARENT_EXPERIMENT = os.getenv("ILCLDM_PARENT_EXPERIMENT", "").strip()
+
+# Stage-2 roi3ch_cls: classification loss on x0_hat
+CLS_LOSS = os.getenv("ILCLDM_CLS_LOSS", "0") == "1"
+CLS_LOSS_LAMBDA = float(os.getenv("ILCLDM_CLS_LOSS_LAMBDA", "0.1"))
+EARLY_STOP_CLS_METRIC = os.getenv("ILCLDM_EARLY_STOP_CLS_METRIC", "0") == "1"
+
 exp = os.getenv("ILCLDM_EXP", "exp_1/")
 whole_Abeta = "./data/whole_Abeta"
-latent_Abeta = "./data/latent_Abeta/"
+latent_Abeta = os.getenv("ILCLDM_LATENT_ABETA", "./data/latent_Abeta/")
 whole_MRI = "./data/whole_MRI"
 latent_MRI = "./data/latent_MRI/"
 path = os.getenv("ILCLDM_REFERENCE_NIFTI", "./data/whole_MRI/3151.nii.gz")
@@ -67,6 +89,6 @@ MRI_ENCODER_MODE = os.getenv("ILCLDM_MRI_ENCODER_MODE", "").strip().lower()
 MRI_ENCODER_CHECKPOINT = os.getenv("ILCLDM_MRI_ENCODER_CHECKPOINT", CHECKPOINT_MRI_ENCODER)
 MRI_ENCODER_FINETUNE_LR_SCALE = float(os.getenv("ILCLDM_MRI_ENCODER_FINETUNE_LR_SCALE", "0.25"))
 
-train = "data_info/train.txt"
-validation = "data_info/validation.txt"
-test = "data_info/test.txt"
+train = os.getenv("ILCLDM_TRAIN_FILE", "data_info/train.txt")
+validation = os.getenv("ILCLDM_VALIDATION_FILE", "data_info/validation.txt")
+test = os.getenv("ILCLDM_TEST_FILE", "data_info/test.txt")

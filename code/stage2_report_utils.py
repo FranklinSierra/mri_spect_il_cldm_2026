@@ -143,6 +143,19 @@ def load_training_frames(exp_key: str) -> dict[str, pd.DataFrame]:
     return load_training_frames_for(EXPERIMENTS[exp_key])
 
 
+def _sanitize_training_csv(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop duplicated header rows and coerce numeric columns (restarts append headers)."""
+    if df.empty:
+        return df
+    out = df.copy()
+    if "Epoch" in out.columns:
+        epoch_str = out["Epoch"].astype(str).str.strip()
+        out = out[~epoch_str.str.lower().eq("epoch")]
+    for col in out.columns:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out.dropna(how="all").reset_index(drop=True)
+
+
 def load_training_frames_for(exp_name: str) -> dict[str, pd.DataFrame]:
     root = result_dir_exp(exp_name)
     frames: dict[str, pd.DataFrame] = {}
@@ -155,7 +168,7 @@ def load_training_frames_for(exp_name: str) -> dict[str, pd.DataFrame]:
     ):
         path = root / f"{name}.csv"
         if path.exists():
-            frames[name] = pd.read_csv(path)
+            frames[name] = _sanitize_training_csv(pd.read_csv(path))
     return frames
 
 
@@ -195,7 +208,141 @@ def load_classification_metrics_for(exp_name: str, run_id: str, mode_key: str) -
     path = inference_dir_exp(exp_name, run_id) / "classification" / "classification_metrics.csv"
     df = pd.read_csv(path)
     df["mode"] = mode_key
-    return df
+    return enrich_classification_metrics(df, exp_name, run_id)
+
+
+def enrich_classification_metrics(
+    df: pd.DataFrame,
+    exp_name: str,
+    run_id: str,
+) -> pd.DataFrame:
+    """Add precision/recall from test_predictions when absent (older inference runs)."""
+    if df.empty:
+        return df
+    if "precision" in df.columns and "recall" in df.columns:
+        if df["precision"].notna().all() and df["recall"].notna().all():
+            return df
+
+    pred_path = inference_dir_exp(exp_name, run_id) / "classification" / "test_predictions.csv"
+    if not pred_path.is_file():
+        return df
+
+    from sklearn.metrics import precision_score, recall_score
+
+    preds = pd.read_csv(pred_path)
+    y_true = preds["label"].to_numpy()
+    out = df.copy()
+    precisions: list[float] = []
+    recalls: list[float] = []
+    for _, row in out.iterrows():
+        pred_col = f"pred_{row['model']}"
+        if pred_col not in preds.columns:
+            precisions.append(float("nan"))
+            recalls.append(float("nan"))
+            continue
+        y_pred = preds[pred_col].to_numpy()
+        precisions.append(float(precision_score(y_true, y_pred, zero_division=0)))
+        recalls.append(float(recall_score(y_true, y_pred, zero_division=0)))
+    out["precision"] = precisions
+    out["recall"] = recalls
+    return out
+
+
+def load_test_latent_matrix_for(
+    exp_name: str,
+    run_id: str,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Flattened DDIM test latents (`sampled_latent_final`) from inference metadata."""
+    meta_path = inference_dir_exp(exp_name, run_id) / "metadata.csv"
+    if not meta_path.is_file():
+        raise FileNotFoundError(f"Missing inference metadata: {meta_path}")
+    metadata = pd.read_csv(meta_path, dtype={"ID": str})
+    test_rows = metadata[metadata["split"] == "test"].copy()
+    if test_rows.empty:
+        raise ValueError(f"No test split rows in {meta_path}")
+
+    features: list[np.ndarray] = []
+    labels: list[int] = []
+    ids: list[str] = []
+    for row in test_rows.itertuples(index=False):
+        rep_path = Path(row.representation_path)
+        if not rep_path.is_file():
+            raise FileNotFoundError(f"Missing representation: {rep_path}")
+        payload = np.load(rep_path)
+        features.append(payload["sampled_latent_final"].reshape(-1).astype(np.float32))
+        labels.append(int(row.label))
+        ids.append(str(row.ID))
+    return np.asarray(features, dtype=np.float32), np.asarray(labels, dtype=np.int64), ids
+
+
+def ppmi_master_path() -> Path:
+    return repo_root() / "PPMI_MASTER_v2.xlsx"
+
+
+NHY_STAGE_ORDER: tuple[str, ...] = ("control", "NHY1", "NHY2")
+
+
+def nhy_stage_label(subject: dict[str, str]) -> str:
+    """Map PPMI row to clinical stage bucket for boxplots (control / NHY1 / NHY2)."""
+    cohort = str(subject.get("COHORT", "")).split(".")[0]
+    if cohort == "2":
+        return "control"
+    nhy = str(subject.get("NHY", "")).split(".")[0]
+    if nhy == "1":
+        return "NHY1"
+    if nhy == "2":
+        return "NHY2"
+    return "NHY_other"
+
+
+def load_classifier_test_predictions(exp_name: str, run_id: str) -> pd.DataFrame:
+    path = inference_dir_exp(exp_name, run_id) / "classification" / "test_predictions.csv"
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing test predictions: {path}")
+    return pd.read_csv(path, dtype={"ID": str})
+
+
+def build_parkinson_probability_by_nhy_stage(
+    exp_name: str,
+    run_id: str,
+    model_name: str,
+    *,
+    xlsx_path: Path | str | None = None,
+) -> pd.DataFrame:
+    """Test-set Parkinson probabilities (score) stratified by PPMI NHY stage."""
+    from code.ppmi_master import load_ppmi_subjects
+
+    preds = load_classifier_test_predictions(exp_name, run_id)
+    score_col = f"score_{model_name}"
+    if score_col not in preds.columns:
+        available = [c.replace("score_", "") for c in preds.columns if c.startswith("score_")]
+        raise KeyError(f"Unknown model {model_name!r}; available scores: {available}")
+
+    xlsx = Path(xlsx_path) if xlsx_path is not None else ppmi_master_path()
+    if not xlsx.is_file():
+        raise FileNotFoundError(f"Missing PPMI master file: {xlsx}")
+    subjects = load_ppmi_subjects(xlsx)
+
+    rows: list[dict] = []
+    for _, row in preds.iterrows():
+        sid = str(row["ID"])
+        if sid not in subjects:
+            continue
+        stage = nhy_stage_label(subjects[sid])
+        if stage not in NHY_STAGE_ORDER:
+            continue
+        rows.append(
+            {
+                "ID": sid,
+                "label": int(row["label"]),
+                "stage": stage,
+                "parkinson_probability": float(row[score_col]),
+                "predicted_parkinson": int(row.get(f"pred_{model_name}", (row[score_col] >= 0.5))),
+            }
+        )
+    out = pd.DataFrame(rows)
+    out["stage"] = pd.Categorical(out["stage"], categories=list(NHY_STAGE_ORDER), ordered=True)
+    return out.sort_values(["stage", "ID"]).reset_index(drop=True)
 
 
 def best_validation_epoch(

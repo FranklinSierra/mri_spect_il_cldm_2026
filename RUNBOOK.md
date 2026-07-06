@@ -257,6 +257,231 @@ python inference.py --exp exp_nm_s2_frozen_abl_latloss01 --mri-encoder-mode froz
 
 ---
 
+## 5d. Wave h05 (warm-start desde `abl_hight05`)
+
+Cuatro experimentos derivados del baseline `abl_hight05`, cada uno con **un solo delta**, warm-start desde `result/exp_nm_s2_frozen_abl_hight05/Unet.pth.tar`. Definidos en [`experiments/registry.json`](experiments/registry.json) con trazabilidad (`parent`, `init_checkpoint`, `run_manifest.json`).
+
+| Clave | Carpeta `result/` | Delta único |
+|-------|-------------------|-------------|
+| `h05_ht08` | `exp_nm_s2_frozen_h05_ht08` | `ILCLDM_HIGH_T_SAMPLE_PROB=0.8` |
+| `h05_roi3ch` | `exp_nm_s2_frozen_h05_roi3ch` | `ILCLDM_UNET_ROI_CHANNEL=1` (3.er canal UNet) |
+| `h05_nolabel` | `exp_nm_s2_frozen_h05_nolabel` | `ILCLDM_USE_TRAIN_LABEL=0` |
+| `h05_aux5` | `exp_nm_s2_frozen_h05_aux5` | `ILCLDM_AUX_IMAGE_EVERY_N=5`, `ILCLDM_AUX_IMAGE_LAMBDA=0.25` |
+
+**Requisito:** el checkpoint de `abl_hight05` debe existir antes de lanzar la wave.
+
+```bash
+export ILCLDM_AAE_CHECKPOINT=result/exp_nm_s1_spect/AAE.pth.tar
+
+python3 scripts/run_ablation.py h05_ht08    --gpu 0
+python3 scripts/run_ablation.py h05_roi3ch  --gpu 1
+python3 scripts/run_ablation.py h05_nolabel --gpu 2
+python3 scripts/run_ablation.py h05_aux5    --gpu 3
+```
+
+**Inferencia** (el UNet de 3 canales se infiere de `run_manifest.json`; no hace falta exportar `ILCLDM_UNET_ROI_CHANNEL`):
+
+```bash
+python inference.py --exp exp_nm_s2_frozen_h05_roi3ch --run-id h05_roi3ch \
+  --mri-encoder-mode frozen \
+  --mri-encoder-checkpoint result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar \
+  --save-synthetic-spect --splits train test
+```
+
+---
+
+## 5f. Baseline calibrado (`calib_roi3ch_uni`)
+
+**Primera E2 coherente con calibración latente** `(z−μ)/σ` antes de difundir y desnormalización antes del decoder AAE congelado de E1. Contrasta con `h05_roi3ch` (latentes crudos en difusión + muestreo high-t 0.5 + warm-start).
+
+| Aspecto | `h05_roi3ch` (anterior) | `calib_roi3ch_uni` (nuevo) |
+|---------|-------------------------|----------------------------|
+| Calibración latente | no (UNet en espacio crudo) | **sí** (`ILCLDM_LATENT_CALIBRATION=1`) |
+| Muestreo `t` | `HIGH_T_SAMPLE_PROB=0.5` | **uniforme** (`HIGH_T_SAMPLE_PROB=0`) |
+| ROI 3.er canal | sí | sí |
+| E1 SPECT/MRI | congelados | congelados (mismos checkpoints) |
+| Latentes train | `data/latent_Abeta/` crudos | **mismos archivos** (μ/σ en `data_info/latent_stats_latent_Abeta.json`) |
+| UNet init | warm-start `abl_hight05` | **scratch** (sin `init_checkpoint`) |
+
+**Clave registry:** `calib_roi3ch_uni` → `result/exp_nm_s2_frozen_calib_roi3ch_uni/`
+
+**No requiere repetir E1:** los `.nii.gz` en `data/latent_Abeta/` son salidas crudas del encoder; la normalización ocurre al cargar en E2.
+
+```bash
+export ILCLDM_AAE_CHECKPOINT=result/exp_nm_s1_spect/AAE.pth.tar
+python3 scripts/run_ablation.py calib_roi3ch_uni --gpu 0
+```
+
+**Inferencia:**
+
+```bash
+python3 inference.py --exp exp_nm_s2_frozen_calib_roi3ch_uni --run-id calib_roi3ch_uni \
+  --mri-encoder-mode frozen \
+  --mri-encoder-checkpoint result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar \
+  --save-synthetic-spect --splits train test
+```
+
+Re-ejecutar `code/auditoria_diffusion.ipynb` con `AUDIT_EXP=exp_nm_s2_frozen_calib_roi3ch_uni` tras entrenar para comparar one-step / DDIM / calibración.
+
+---
+
+## 5g. Calibrado + high-t (`h05_calib_roi3ch`)
+
+**Celda factorial que faltaba:** misma calibración latente que `calib_roi3ch_uni`, pero con **warm-start** desde su UNet y **sobremuestreo high-t 50%** en `t > 700` (receta `h05_roi3ch`).
+
+| Aspecto | `calib_roi3ch_uni` | `h05_calib_roi3ch` |
+|---------|-------------------|---------------------|
+| Calibración latente | sí | sí |
+| Muestreo `t` | uniforme (`HIGH_T_SAMPLE_PROB=0`) | **0.5 en t>700** |
+| UNet init | scratch | **warm-start `calib_roi3ch_uni`** |
+| ROI 3.er canal | sí | sí |
+
+**Prerrequisito:** `result/exp_nm_s2_frozen_calib_roi3ch_uni/Unet.pth.tar` debe existir.
+
+**Clave registry:** `h05_calib_roi3ch` → `result/exp_nm_s2_frozen_h05_calib_roi3ch/`
+
+```bash
+export ILCLDM_AAE_CHECKPOINT=result/exp_nm_s1_spect/AAE.pth.tar
+python3 scripts/run_ablation.py h05_calib_roi3ch --gpu <N>
+```
+
+**Inferencia** (el manifest guardará `LATENT_CALIBRATION=1`; `inference.py` lo aplica desde `run_manifest.json`):
+
+```bash
+python3 inference.py --exp exp_nm_s2_frozen_h05_calib_roi3ch --run-id h05_calib_roi3ch \
+  --mri-encoder-mode frozen \
+  --mri-encoder-checkpoint result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar \
+  --save-synthetic-spect --splits train test
+```
+
+Tras entrenar, añadir `h05_calib_roi3ch` a `WAVE_ORDER` en `code/stage2_experiments_report.ipynb` y re-ejecutar §6 (respeta `LATENT_CALIBRATION` por experimento).
+
+---
+
+## 5e. Wave roi3ch (split NHY + 3 derivados)
+
+Segunda wave centrada en **`h05_roi3ch`** (3.er canal UNet, clasificación PD). Cinco claves en [`experiments/registry.json`](experiments/registry.json): baseline `h05_roi3ch` + cuatro nuevos experimentos.
+
+| Clave | Carpeta `result/` | Split | Delta principal |
+|-------|-------------------|-------|-----------------|
+| `h05_roi3ch` | `exp_nm_s2_frozen_h05_roi3ch` | primario | baseline wave h05 (ROI 3ch) |
+| `abl_hight05_nhy` | `exp_nm_s2_frozen_abl_hight05_nhy` | **nhy_v1** | high-t 0.5, scratch (análogo `abl_hight05`) |
+| `h05_roi3ch_nhy` | `exp_nm_s2_frozen_h05_roi3ch_nhy` | **nhy_v1** | warm-start `abl_hight05_nhy` + ROI 3ch (análogo `h05_roi3ch`) |
+| `roi3ch_nhy` | `exp_nm_s2_frozen_roi3ch_nhy` | **nhy_v1** | pipeline E1→E2→E3 completo, **sin** warm-start (baseline cold-start) |
+| `roi3ch_nolabel` | `exp_nm_s2_frozen_roi3ch_nolabel` | primario | `USE_TRAIN_LABEL=0`, warm-start `h05_roi3ch` |
+| `roi3ch_ht08` | `exp_nm_s2_frozen_roi3ch_ht08` | primario | `HIGH_T_SAMPLE_PROB=0.8`, warm-start `h05_roi3ch` |
+| `roi3ch_cls` | `exp_nm_s2_frozen_roi3ch_cls` | primario | cls loss en `x0_hat`, early stop **solo** `balanced_accuracy` |
+
+**Métrica primaria del reporte:** balanced accuracy (clasificación PD/control). PSNR/SSIM quedan como diagnóstico.
+
+### Pista A — split NHY (artefactos aislados)
+
+**No modifica** `data_info/train.txt`, `test.txt` ni `data/latent_Abeta/` del split primario.
+
+Hay dos variantes de E3 en NHY:
+
+| Ruta | Claves | Uso |
+|------|--------|-----|
+| **Cadena equivalente a primario** | `abl_hight05_nhy` → `h05_roi3ch_nhy` | Comparación justa con `h05_roi3ch` (warm-start sin fuga) |
+| **Cold-start** | `roi3ch_nhy` | Baseline ya corrido (ROI 3ch from scratch) |
+
+**Paso 0 — Generar split** (sin GPU):
+
+```bash
+python3 scripts/generate_nhy_split.py --out data_info/splits/nhy_v1
+# Revisar data_info/splits/nhy_v1/split_manifest.json y nhy_distribution.csv
+```
+
+**Variables de entorno** para toda la pista NHY (`source scripts/nhy_v1_env.sh`):
+
+```bash
+export ILCLDM_TRAIN_FILE=data_info/splits/nhy_v1/train.txt
+export ILCLDM_TEST_FILE=data_info/splits/nhy_v1/test.txt
+export ILCLDM_VALIDATION_FILE=data_info/splits/nhy_v1/validation.txt
+export ILCLDM_LATENT_ABETA=data/latent_Abeta_nhy_v1/
+```
+
+**Paso 1 — E1 SPECT** (AAE + latentes del train NHY):
+
+```bash
+source scripts/nhy_v1_env.sh
+export ILCLDM_EXP=exp_nm_s1_spect_nhy_v1/
+export ILCLDM_RUN_STAGE1_MRI_PRETRAIN=0
+export ILCLDM_RUN_STAGE2_DIFFUSION=0
+scripts/run_experiment.sh s1_spect exp_nm_s1_spect_nhy_v1
+# → result/exp_nm_s1_spect_nhy_v1/AAE.pth.tar
+# → data/latent_Abeta_nhy_v1/*.nii.gz (~148 IDs train nhy_v1)
+```
+
+**Paso 2 — E1 MRI**:
+
+```bash
+source scripts/nhy_v1_env.sh
+scripts/run_experiment.sh s1_mri exp_nm_s1_mri_nhy_v1
+# → result/exp_nm_s1_mri_nhy_v1/phase1_mri/checkpoints/MRI_AAE.pth.tar
+```
+
+**Paso 3a — E3 cadena NHY** (recomendado, análogo `abl_hight05` → `h05_roi3ch`):
+
+```bash
+# 3a.1 high-t scratch (2ch UNet)
+python3 scripts/run_ablation.py abl_hight05_nhy --gpu <N>
+# → result/exp_nm_s2_frozen_abl_hight05_nhy/Unet.pth.tar
+
+# 3a.2 ROI 3ch warm-start desde abl_hight05_nhy
+python3 scripts/run_ablation.py h05_roi3ch_nhy --gpu <N>
+# → result/exp_nm_s2_frozen_h05_roi3ch_nhy/Unet.pth.tar
+```
+
+**Paso 3b — E3 `roi3ch_nhy`** (cold-start, opcional / ya corrido):
+
+```bash
+python3 scripts/run_ablation.py roi3ch_nhy --gpu <N>
+```
+
+**Paso 4 — Inferencia** (`h05_roi3ch_nhy` o `roi3ch_nhy`):
+
+```bash
+source scripts/nhy_v1_env.sh
+export ILCLDM_AAE_CHECKPOINT=result/exp_nm_s1_spect_nhy_v1/AAE.pth.tar
+export ILCLDM_MRI_ENCODER_CHECKPOINT=result/exp_nm_s1_mri_nhy_v1/phase1_mri/checkpoints/MRI_AAE.pth.tar
+
+# Cadena NHY (equivalente h05_roi3ch)
+python3 inference.py --exp exp_nm_s2_frozen_h05_roi3ch_nhy --run-id h05_roi3ch_nhy \
+  --mri-encoder-mode frozen --splits train test --save-synthetic-spect
+
+# Cold-start (baseline)
+python3 inference.py --exp exp_nm_s2_frozen_roi3ch_nhy --run-id roi3ch_nhy \
+  --mri-encoder-mode frozen --splits train test --save-synthetic-spect
+```
+
+### Pista B — derivados en split primario (warm-start `h05_roi3ch`)
+
+Requisito: checkpoint `result/exp_nm_s2_frozen_h05_roi3ch/Unet.pth.tar` debe existir.
+
+```bash
+export ILCLDM_AAE_CHECKPOINT=result/exp_nm_s1_spect/AAE.pth.tar
+
+python3 scripts/run_ablation.py roi3ch_nolabel --gpu 0
+python3 scripts/run_ablation.py roi3ch_ht08    --gpu 1
+python3 scripts/run_ablation.py roi3ch_cls     --gpu 2
+```
+
+`roi3ch_cls` guarda `ClsHead.pth.tar` junto al UNet y usa early stopping por `validation_cls.csv` (balanced accuracy).
+
+**Inferencia** (split primario por defecto):
+
+```bash
+python3 inference.py --exp exp_nm_s2_frozen_roi3ch_nolabel --run-id roi3ch_nolabel \
+  --mri-encoder-mode frozen \
+  --mri-encoder-checkpoint result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar \
+  --save-synthetic-spect --splits train test
+```
+
+Reporte notebook: sección **Wave roi3ch** en [`code/stage2_experiments_report.ipynb`](code/stage2_experiments_report.ipynb); export CSV en `result/stage2_roi3ch_wave_summary/`.
+
+---
+
 ## 6. E4 — Fase 2 con encoder MRI **fine-tune** (UNet + encoder)
 
 ```bash
@@ -339,6 +564,26 @@ preflight → E1 (SPECT) → E2 (MRI) → E3 (baseline LDM)
 ```
 
 E5 y E4 pueden lanzarse en paralelo en GPUs distintas si copias el AAE de E1 en cada `result/<exp>/`.
+
+---
+
+## Auditoría rápida de difusión (notebook)
+
+Diagnóstico visual **sin reentrenar**: schedule coseno (`s`), one-step vs DDIM, calibración de latentes, ε-error en t altos.
+
+```bash
+cd /path/to/IL-CLDM
+# Jupyter / VS Code: abrir code/auditoria_diffusion.ipynb
+# Perfil rápido por defecto: 2 sujetos test, exp exp_nm_s2_frozen_h05_roi3ch
+jupyter nbconvert --to notebook --execute code/auditoria_diffusion.ipynb \
+  --output auditoria_diffusion_executed.ipynb
+```
+
+**Knobs** (celda de configuración del notebook): `AUDIT_EXP`, `MAX_SUBJECTS`, `FIXED_T_VALUES`, `COSINE_S_VALUES`, `DDIM_STEPS_LIST`.
+
+**Salidas:** `result/auditoria_diffusion/*.png` y `*.csv`.
+
+Requisitos: checkpoints E1 (`AAE`) y E2 (`Unet.pth.tar`) del experimento; latentes en `data/latent_Abeta/` para stats de calibración (`data_info/latent_stats_latent_Abeta.json`).
 
 ---
 

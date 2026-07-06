@@ -188,7 +188,7 @@ RECOMENDACIONES PARA PRESERVAR PICOS SPECT EN SINTESIS
 Contexto codigo actual (IL-CLDM):
 - Etapa 1 AAE: recon_loss = |SPECT - decoded|.mean() + GAN (main.py).
 - Etapa 2 LDM: MSE sobre ruido en espacio latente, no sobre voxels SPECT.
-- Validacion AAE usa clamp(0,1): inadecuado si los datos son z-score (ILCLDM_NORMALIZE=0).
+- Normalizacion unica: z-score por volumen (sin opcion min-max); metricas usan data_range por percentiles.
 
 A. Perdida ponderada en imagen (etapa 1 y/o decode en inferencia)
    w = 1 + alpha * relu(target - 1) o mascara en target > percentil 90.
@@ -215,13 +215,12 @@ F. Muestreo y augmentacion
    Patch sampling sesgado hacia voxels con z alto; evitar clipping que comprima colas.
 
 G. Validacion
-   No usar clamp(0,1) con z-score; ajustar data_range en metricas o evaluar en mascara cerebral.
+   Clamp(0,1) eliminado (solo z-score); data_range por percentiles ya aplicado. Opcional: evaluar en mascara cerebral.
 
 PRIORIDAD SUGERIDA
 1. L1 ponderada + metricas p99/ROI en AAE.
 2. Termino tail/percentile en decode (inferencia o fine-tune).
-3. Corregir clamp y data_range en validacion.
-4. Auxiliary image loss en LDM (opcional).
+3. Auxiliary image loss en LDM (opcional).
         """
     )
 

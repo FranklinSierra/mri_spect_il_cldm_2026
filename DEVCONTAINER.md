@@ -69,8 +69,6 @@ load through `dataset.nifti_to_numpy`, **per-volume z-score** is applied
 (mean 0, std 1 over all voxels). Latent NIfTI under `latent_Abeta/` and
 `latent_MRI/` are loaded without z-score.
 
-Override: `ILCLDM_NORMALIZE=1` uses min-max instead of z-score (legacy).
-
 After replacing raw volumes (e.g. from `temp_data/non_masked`), re-run
 encoding to refresh `data/latent_Abeta/`.
 
