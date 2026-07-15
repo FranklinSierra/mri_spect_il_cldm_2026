@@ -1,5 +1,6 @@
 # Local volumes and experiment outputs (not versioned)
 data/*
+data_rois/*
 dataV2/*
 result/*
 temp_data/*
