@@ -68,6 +68,20 @@ def test_roi3ch_cls_flags():
     assert env["ILCLDM_USE_TRAIN_LABEL"] == "0"
 
 
+def test_calib_roi3ch_nhy_split():
+    registry = load_registry()
+    entry, env = resolve_env(registry, "calib_roi3ch_nhy")
+    assert entry["split_profile"] == "nhy_v1"
+    assert entry["base"] == "base_calib_roi3ch_nhy"
+    assert "init_checkpoint" not in entry
+    assert env["ILCLDM_LATENT_CALIBRATION"] == "1"
+    assert env["ILCLDM_HIGH_T_SAMPLE_PROB"] == "0"
+    assert env["ILCLDM_UNET_ROI_CHANNEL"] == "1"
+    assert env["ILCLDM_TRAIN_FILE"] == "data_info/splits/nhy_v1/train.txt"
+    assert env["ILCLDM_LATENT_ABETA"] == "data/latent_Abeta_nhy_v1/"
+    assert env["ILCLDM_AAE_CHECKPOINT"] == "result/exp_nm_s1_spect_nhy_v1/AAE.pth.tar"
+
+
 def test_h05_calib_roi3ch_warm_start():
     registry = load_registry()
     entry, env = resolve_env(registry, "h05_calib_roi3ch")

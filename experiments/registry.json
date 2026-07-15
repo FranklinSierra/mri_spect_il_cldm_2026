@@ -33,6 +33,34 @@
     "ILCLDM_UNET_ROI_CHANNEL": "1",
     "ILCLDM_USE_TRAIN_LABEL": "1"
   },
+  "base_s1_rois": {
+    "ILCLDM_SKIP_CROP": "1",
+    "ILCLDM_WHOLE_MRI": "data_rois/whole_MRI",
+    "ILCLDM_WHOLE_ABETA": "data_rois/whole_Abeta",
+    "ILCLDM_LATENT_ABETA": "data_rois/latent_Abeta/",
+    "ILCLDM_LATENT_MRI": "data_rois/latent_MRI/",
+    "ILCLDM_ROI_VOLUME_SHAPE": "105,102,102",
+    "ILCLDM_REFERENCE_NIFTI": "data_rois/whole_MRI/3102.nii.gz"
+  },
+  "base_calib_roi3ch_uni_rois": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri_rois/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect_rois/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
+    "ILCLDM_LATENT_CALIBRATION": "1",
+    "ILCLDM_HIGH_T_SAMPLE_PROB": "0",
+    "ILCLDM_HIGH_T_THRESHOLD": "700",
+    "ILCLDM_UNET_ROI_CHANNEL": "1",
+    "ILCLDM_USE_TRAIN_LABEL": "1",
+    "ILCLDM_SKIP_CROP": "1",
+    "ILCLDM_WHOLE_MRI": "data_rois/whole_MRI",
+    "ILCLDM_WHOLE_ABETA": "data_rois/whole_Abeta",
+    "ILCLDM_LATENT_ABETA": "data_rois/latent_Abeta/",
+    "ILCLDM_LATENT_STATS_PATH": "data_info/latent_stats_latent_Abeta_rois.json",
+    "ILCLDM_ROI_VOLUME_SHAPE": "105,102,102",
+    "ILCLDM_REFERENCE_NIFTI": "data_rois/whole_MRI/3102.nii.gz",
+    "ILCLDM_ROI_MASK_PATH": "data_rois/roi_mask_unet.nii.gz"
+  },
   "base_frozen_nhy": {
     "ILCLDM_MRI_ENCODER_MODE": "frozen",
     "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri_nhy_v1/phase1_mri/checkpoints/MRI_AAE.pth.tar",
@@ -50,6 +78,21 @@
     "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
     "ILCLDM_HIGH_T_SAMPLE_PROB": "0.5",
     "ILCLDM_HIGH_T_THRESHOLD": "700",
+    "ILCLDM_TRAIN_FILE": "data_info/splits/nhy_v1/train.txt",
+    "ILCLDM_TEST_FILE": "data_info/splits/nhy_v1/test.txt",
+    "ILCLDM_VALIDATION_FILE": "data_info/splits/nhy_v1/validation.txt",
+    "ILCLDM_LATENT_ABETA": "data/latent_Abeta_nhy_v1/"
+  },
+  "base_calib_roi3ch_nhy": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri_nhy_v1/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect_nhy_v1/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
+    "ILCLDM_LATENT_CALIBRATION": "1",
+    "ILCLDM_HIGH_T_SAMPLE_PROB": "0",
+    "ILCLDM_HIGH_T_THRESHOLD": "700",
+    "ILCLDM_UNET_ROI_CHANNEL": "1",
+    "ILCLDM_USE_TRAIN_LABEL": "1",
     "ILCLDM_TRAIN_FILE": "data_info/splits/nhy_v1/train.txt",
     "ILCLDM_TEST_FILE": "data_info/splits/nhy_v1/test.txt",
     "ILCLDM_VALIDATION_FILE": "data_info/splits/nhy_v1/validation.txt",
@@ -207,6 +250,17 @@
         "ILCLDM_UNET_ROI_CHANNEL": "1"
       }
     },
+    "calib_roi3ch_nhy": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_nhy",
+      "run_id": "calib_roi3ch_nhy",
+      "label": "NHY split: latent calib + ROI 3ch + uniform t (scratch UNet)",
+      "short_label": "calib_roi3ch_nhy",
+      "split_profile": "nhy_v1",
+      "early_stop": "image",
+      "base": "base_calib_roi3ch_nhy",
+      "prerequisite": "E1 SPECT exp_nm_s1_spect_nhy_v1 + E1 MRI exp_nm_s1_mri_nhy_v1; latentes data/latent_Abeta_nhy_v1/",
+      "overrides": {}
+    },
     "roi3ch_nolabel": {
       "exp": "exp_nm_s2_frozen_roi3ch_nolabel",
       "run_id": "roi3ch_nolabel",
@@ -273,6 +327,17 @@
         "ILCLDM_HIGH_T_SAMPLE_PROB": "0.5",
         "ILCLDM_HIGH_T_THRESHOLD": "700"
       }
+    },
+    "calib_roi3ch_uni_rois": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois",
+      "run_id": "calib_roi3ch_uni_rois",
+      "label": "ROI patch: latent calib + ROI 3ch + uniform t (E1/E2 from scratch on data_rois)",
+      "short_label": "calib_roi3ch_uni_rois",
+      "early_stop": "image",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois",
+      "prerequisite": "E1 SPECT exp_nm_s1_spect_rois + E1 MRI exp_nm_s1_mri_rois; data_rois/roi_mask_unet.nii.gz; latentes data_rois/latent_Abeta/",
+      "overrides": {}
     }
   }
 }

@@ -9,10 +9,20 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from code.volume_shapes import (
+    LEGACY_LATENT_SHAPE,
+    LEGACY_VOLUME_SHAPE,
+    get_latent_shape,
+    get_volume_shape,
+    get_working_volume_shape,
+    pad_volume_to_working_shape,
+    volume_to_latent_shape,
+)
 from dataset import crop
 
-CROP_SHAPE = (160, 192, 160)
-LATENT_SHAPE = (40, 48, 40)
+# Legacy aliases (full-brain IL-CLDM crop).
+CROP_SHAPE = LEGACY_VOLUME_SHAPE
+LATENT_SHAPE = LEGACY_LATENT_SHAPE
 
 
 def load_roi_mask_volume(path: str | Path) -> np.ndarray:
@@ -28,13 +38,26 @@ def crop_roi_mask(vol: np.ndarray) -> np.ndarray:
     return crop(vol)
 
 
-def load_roi_mask_cropped(path: str | Path) -> np.ndarray:
-    mask = crop_roi_mask(load_roi_mask_volume(path))
-    if mask.shape != CROP_SHAPE:
-        raise ValueError(f"Expected cropped ROI shape {CROP_SHAPE}, got {mask.shape}")
+def load_roi_mask_for_pipeline(path: str | Path) -> np.ndarray:
+    """Load mask aligned with current volume profile (legacy crop or ROI patch as-is)."""
+    import config
+
+    mask = load_roi_mask_volume(path)
+    if not config.SKIP_CROP:
+        mask = crop_roi_mask(mask)
+    expected = get_volume_shape()
+    if tuple(mask.shape) != expected:
+        raise ValueError(f"Expected ROI mask shape {expected}, got {mask.shape} ({path})")
+    if getattr(config, "ROI_VOLUME_SHAPE", None):
+        mask = pad_volume_to_working_shape(mask, raw_shape=expected, working_shape=get_working_volume_shape())
     if mask.sum() == 0:
-        raise ValueError(f"ROI mask empty after crop: {path}")
+        raise ValueError(f"ROI mask empty: {path}")
     return mask
+
+
+def load_roi_mask_cropped(path: str | Path) -> np.ndarray:
+    """Legacy name: mask in pipeline volume space."""
+    return load_roi_mask_for_pipeline(path)
 
 
 def load_roi_mask_tensor(
@@ -47,29 +70,32 @@ def load_roi_mask_tensor(
     mask_path = Path(path or config.ROI_MASK_PATH)
     if not mask_path.is_file():
         raise FileNotFoundError(f"ROI mask not found: {mask_path}")
-    mask = load_roi_mask_cropped(mask_path)
-    return torch.as_tensor(mask, device=device, dtype=torch.float32).view(1, 1, *CROP_SHAPE)
+    mask = load_roi_mask_for_pipeline(mask_path)
+    vol_shape = get_working_volume_shape()
+    return torch.as_tensor(mask, device=device, dtype=torch.float32).view(1, 1, *vol_shape)
 
 
-def downsample_roi_to_latent(mask_cropped: np.ndarray) -> np.ndarray:
-    """Downsample cropped ROI (160,192,160) to latent grid (40,48,40) via max-pool."""
-    tensor = torch.as_tensor(mask_cropped, dtype=torch.float32).view(1, 1, *mask_cropped.shape)
+def downsample_roi_to_latent(mask_volume: np.ndarray) -> np.ndarray:
+    """Downsample volume-space mask to latent grid (two stride-2 max-pools)."""
+    expected_latent = volume_to_latent_shape(mask_volume.shape)
+    tensor = torch.as_tensor(mask_volume, dtype=torch.float32).view(1, 1, *mask_volume.shape)
     tensor = F.max_pool3d(tensor, kernel_size=2, stride=2)
     tensor = F.max_pool3d(tensor, kernel_size=2, stride=2)
     out = tensor.squeeze(0).squeeze(0).cpu().numpy()
-    if tuple(out.shape) != LATENT_SHAPE:
-        raise ValueError(f"Expected latent ROI shape {LATENT_SHAPE}, got {out.shape}")
+    if tuple(out.shape) != expected_latent:
+        raise ValueError(f"Expected latent ROI shape {expected_latent}, got {out.shape}")
     return out
 
 
 def load_roi_latent_buffer(path: str | Path | None = None) -> torch.Tensor:
-    """Return (1, 1, 40, 48, 40) ROI mask for UNet input channel."""
+    """Return (1, 1, Dz, Dy, Dx) ROI mask for UNet input channel."""
     import config
 
     mask_path = Path(path or config.ROI_MASK_PATH)
-    mask = load_roi_mask_cropped(mask_path)
+    mask = load_roi_mask_for_pipeline(mask_path)
     latent = downsample_roi_to_latent(mask)
-    return torch.as_tensor(latent, dtype=torch.float32).view(1, 1, *LATENT_SHAPE)
+    latent_shape = get_latent_shape()
+    return torch.as_tensor(latent, dtype=torch.float32).view(1, 1, *latent_shape)
 
 
 def try_load_roi_mask_tensor(device: torch.device | str) -> torch.Tensor | None:
@@ -90,14 +116,14 @@ def try_load_roi_mask_tensor(device: torch.device | str) -> torch.Tensor | None:
 
 
 def try_load_roi_mask_numpy() -> np.ndarray | None:
-    """Load cropped ROI mask for metrics, or None if missing."""
+    """Load ROI mask for metrics, or None if missing."""
     import config
 
     mask_path = Path(config.ROI_MASK_PATH)
     if not mask_path.is_file():
         return None
     try:
-        return load_roi_mask_cropped(mask_path)
+        return load_roi_mask_for_pipeline(mask_path)
     except ValueError as exc:
         print(f"Warning: ROI mask invalid ({exc}); ROI metrics disabled.")
         return None

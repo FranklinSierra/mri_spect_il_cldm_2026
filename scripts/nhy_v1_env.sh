@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Source before E1 SPECT, E1 MRI, E3 NHY stage-2 ablations, or inference on the NHY split.
+# Source before E1 SPECT, E1 MRI, E3 NHY stage-2 ablations (abl_hight05_nhy, calib_roi3ch_nhy, …), or inference on the NHY split.
 # Usage: source scripts/nhy_v1_env.sh
 
 export ILCLDM_TRAIN_FILE=data_info/splits/nhy_v1/train.txt

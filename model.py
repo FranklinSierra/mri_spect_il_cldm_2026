@@ -349,7 +349,17 @@ class UNet(nn.Module):
             return torch.cat([x, cond, roi], dim=1)
         return torch.cat([x, cond], dim=1)
 
+    @staticmethod
+    def _align_skip(decoder_feat, skip):
+        """Match skip-connection spatial size to the decoder feature map."""
+        if decoder_feat.shape[2:] == skip.shape[2:]:
+            return skip
+        return torch.nn.functional.interpolate(
+            skip, size=decoder_feat.shape[2:], mode="nearest"
+        )
+
     def forward(self, x, y, time, label=None, precomputed_condition=False):
+        target_shape = x.shape[2:]
         cond = y if precomputed_condition else self.cond(y)
         x = self._concat_inputs(x, cond)
         feats = []
@@ -376,11 +386,17 @@ class UNet(nn.Module):
 
         for layer in self.ups:
             if isinstance(layer, ResnetBlocWithAttn):
-                x = layer(torch.cat((x, feats.pop()), dim=1), t)
+                skip = self._align_skip(x, feats.pop())
+                x = layer(torch.cat((x, skip), dim=1), t)
             else:
                 x = layer(x)
 
-        return self.final_conv(x)
+        out = self.final_conv(x)
+        if out.shape[2:] != target_shape:
+            out = torch.nn.functional.interpolate(
+                out, size=target_shape, mode="trilinear", align_corners=False
+            )
+        return out
 
 
 class DiffusionConditioner(nn.Module):
@@ -398,15 +414,19 @@ class DiffusionConditioner(nn.Module):
         return self.layers(x)
 
 
-LATENT_GRID_SHAPE = (40, 48, 40)
-LATENT_FLAT_DIM = 40 * 48 * 40
+from code.volume_shapes import LEGACY_LATENT_SHAPE, get_latent_shape
+
+LATENT_GRID_SHAPE = LEGACY_LATENT_SHAPE
 
 
 class LatentClsHead(nn.Module):
-    """Binary classifier on flattened predicted latent x0_hat (B, 1, 40, 48, 40)."""
+    """Binary classifier on flattened predicted latent x0_hat."""
 
-    def __init__(self, input_dim: int = LATENT_FLAT_DIM):
+    def __init__(self, input_dim: int | None = None):
         super().__init__()
+        if input_dim is None:
+            ls = get_latent_shape()
+            input_dim = int(ls[0] * ls[1] * ls[2])
         self.net = nn.Sequential(
             nn.Linear(input_dim, 128),
             nn.ReLU(),
@@ -429,7 +449,8 @@ def build_unet(in_channel=None, use_roi_channel=None):
         use_roi_channel = config.UNET_ROI_CHANNEL
     if in_channel is None:
         in_channel = 2 + int(use_roi_channel)
-    net = UNet(in_channel=in_channel)
+    latent_shape = get_latent_shape()
+    net = UNet(in_channel=in_channel, image_size=latent_shape[0])
     if use_roi_channel:
         from code.roi_mask_utils import load_roi_latent_buffer
 

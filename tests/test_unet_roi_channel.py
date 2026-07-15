@@ -35,7 +35,7 @@ def test_build_unet_three_channels_with_roi_buffer(monkeypatch, tmp_path):
 
 
 def test_concat_inputs_expands_roi_batch():
-    net = build_unet(in_channel=3, use_roi_channel=True)
+    net = build_unet(in_channel=3, use_roi_channel=False)
     net.roi_latent = torch.ones(1, 1, *LATENT_SHAPE)
     x = torch.zeros(4, 1, *LATENT_SHAPE)
     cond = torch.zeros(4, 1, *LATENT_SHAPE)

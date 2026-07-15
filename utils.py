@@ -88,9 +88,11 @@ def _adapt_unet_input_conv(state_dict, model_state):
     return adapted
 
 
-def load_checkpoint(checkpoint_file, model, optimizer, lr):
-    print("=> Loading checkpoint")
-    checkpoint = torch.load(checkpoint_file, map_location=config.device)
+def load_checkpoint(checkpoint_file, model, optimizer, lr, model_name=None):
+    label = f" ({model_name})" if model_name else ""
+    path = Path(checkpoint_file).resolve()
+    print(f"=> Loading checkpoint{label}: {path}")
+    checkpoint = torch.load(path, map_location=config.device)
     state_dict = checkpoint["state_dict"]
     model_state = model.state_dict()
     state_dict = _normalize_checkpoint_state_dict(state_dict, model_state)
@@ -145,10 +147,11 @@ def load_cls_head_checkpoint(cls_head, filename=None):
     path = Path(filename) if filename else cls_head_checkpoint_path()
     if not path.is_file():
         return False
-    checkpoint = torch.load(path, map_location=config.device)
+    resolved = path.resolve()
+    print(f"=> Loading checkpoint (ClsHead): {resolved}")
+    checkpoint = torch.load(resolved, map_location=config.device)
     state_dict = checkpoint.get("state_dict", checkpoint)
     cls_head.load_state_dict(state_dict, strict=True)
-    print(f"=> Loaded cls head from {path}")
     return True
 
 

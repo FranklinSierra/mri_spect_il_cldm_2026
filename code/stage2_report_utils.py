@@ -59,7 +59,57 @@ MODE_LABELS = {
 
 LABEL_NAMES = {0.0: "control", 1.0: "parkinson"}
 
+DOMAIN_PROFILE_ORDER = ("primary", "data_rois", "nhy_v1")
+DOMAIN_PROFILE_META: dict[str, tuple[str, str]] = {
+    "primary": ("fullbrain", "Full-brain (split primario)"),
+    "data_rois": ("roi_patch", "ROI patch (data_rois/)"),
+    "nhy_v1": ("nhy_v1", "Split NHY v1"),
+}
+
 EarlyStopCriterion = Literal["image", "latent"]
+
+
+def mode_split_profile(mode_key: str, experiments_registry: dict) -> str:
+    return experiments_registry.get(mode_key, {}).get("split_profile", "primary")
+
+
+def modes_for_profile(
+    modes: list[str],
+    experiments_registry: dict,
+    profile: str,
+) -> list[str]:
+    return [m for m in modes if mode_split_profile(m, experiments_registry) == profile]
+
+
+def domain_buckets_for_modes(
+    modes: list[str],
+    experiments_registry: dict,
+) -> list[tuple[str, list[str], str]]:
+    """Group experiment keys by data domain; do not mix domains in one metric plot."""
+    buckets: list[tuple[str, list[str], str]] = []
+    for profile in DOMAIN_PROFILE_ORDER:
+        group = modes_for_profile(modes, experiments_registry, profile)
+        if group:
+            key, label = DOMAIN_PROFILE_META[profile]
+            buckets.append((key, group, label))
+    return buckets
+
+
+def subset_by_modes(
+    df: pd.DataFrame,
+    modes: list[str],
+    *,
+    mode_col: str = "mode",
+) -> pd.DataFrame:
+    return df[df[mode_col].isin(modes)].copy()
+
+
+def short_labels_for_modes(modes: list[str], mode_short: dict[str, str]) -> list[str]:
+    return [mode_short[m] for m in modes]
+
+
+def colors_for_modes(modes: list[str], mode_colors: dict[str, str]) -> list[str]:
+    return [mode_colors[m] for m in modes]
 
 
 def result_dir(exp_key: str) -> Path:

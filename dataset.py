@@ -158,7 +158,20 @@ def random_translation(data1):
     return data1[10+i:170+i,18+j:210+j,10+z:170+z]
 
 def crop(data1):
-    return data1[10:170,18:210,10:170]
+    if getattr(config, "ROI_VOLUME_SHAPE", None):
+        from code.volume_shapes import get_volume_shape, get_working_volume_shape, pad_volume_to_working_shape
+
+        raw_shape = get_volume_shape()
+        working_shape = get_working_volume_shape()
+        shape = tuple(data1.shape[:3])
+        if shape == working_shape:
+            return data1
+        if shape != raw_shape:
+            raise ValueError(f"Expected ROI volume shape {raw_shape}, got {data1.shape}")
+        return pad_volume_to_working_shape(data1, raw_shape=raw_shape, working_shape=working_shape)
+    if config.SKIP_CROP:
+        return data1
+    return data1[10:170, 18:210, 10:170]
 
 # This is for the training of the first stage
 class OneDataset(Dataset):
@@ -178,7 +191,7 @@ class OneDataset(Dataset):
         path_Abeta = resolve_nifti_path(self.root_Abeta, image_id)
         name = os.path.basename(path_Abeta)
         Abeta = nifti_to_numpy(path_Abeta)
-        if self.stage == "train":
+        if self.stage == "train" and not config.SKIP_CROP:
             Abeta = random_translation(Abeta)
         else:
             Abeta = crop(Abeta)

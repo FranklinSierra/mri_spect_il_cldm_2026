@@ -47,6 +47,16 @@ LATENT_MEAN = float(_env_latent_mean) if _env_latent_mean else None
 LATENT_STD = float(_env_latent_std) if _env_latent_std else None
 LATENT_STATS_PATH = os.getenv("ILCLDM_LATENT_STATS_PATH", "").strip()
 
+# ROI patch profile (data_rois): skip IL-CLDM crop(); volumes already cropped on disk.
+SKIP_CROP = os.getenv("ILCLDM_SKIP_CROP", "0") == "1"
+_env_roi_volume_shape = os.getenv("ILCLDM_ROI_VOLUME_SHAPE", "").strip()
+ROI_VOLUME_SHAPE = None
+if _env_roi_volume_shape:
+    _parts = [int(x.strip()) for x in _env_roi_volume_shape.split(",") if x.strip()]
+    if len(_parts) != 3:
+        raise ValueError(f"ILCLDM_ROI_VOLUME_SHAPE must have 3 integers, got {_env_roi_volume_shape!r}")
+    ROI_VOLUME_SHAPE = tuple(_parts)
+
 # Stage-2 v2: ROI-weighted aux loss (basal ganglia mask, same crop as volumes)
 ROI_MASK_PATH = os.getenv("ILCLDM_ROI_MASK_PATH", "data/mask_basal_ganglia.nii.gz")
 ROI_WEIGHT_ALPHA = float(os.getenv("ILCLDM_ROI_WEIGHT_ALPHA", "3.0"))
@@ -69,10 +79,10 @@ CLS_LOSS_LAMBDA = float(os.getenv("ILCLDM_CLS_LOSS_LAMBDA", "0.1"))
 EARLY_STOP_CLS_METRIC = os.getenv("ILCLDM_EARLY_STOP_CLS_METRIC", "0") == "1"
 
 exp = os.getenv("ILCLDM_EXP", "exp_1/")
-whole_Abeta = "./data/whole_Abeta"
+whole_Abeta = os.getenv("ILCLDM_WHOLE_ABETA", "./data/whole_Abeta")
 latent_Abeta = os.getenv("ILCLDM_LATENT_ABETA", "./data/latent_Abeta/")
-whole_MRI = "./data/whole_MRI"
-latent_MRI = "./data/latent_MRI/"
+whole_MRI = os.getenv("ILCLDM_WHOLE_MRI", "./data/whole_MRI")
+latent_MRI = os.getenv("ILCLDM_LATENT_MRI", "./data/latent_MRI/")
 path = os.getenv("ILCLDM_REFERENCE_NIFTI", "./data/whole_MRI/3151.nii.gz")
 gpus = [0]
 

@@ -45,6 +45,7 @@ except ImportError:  # pragma: no cover - handled at runtime with a clear error.
 
 import config
 from dataset import OneDataset, resolve_nifti_path
+from code.volume_shapes import get_latent_shape, get_volume_shape, get_working_volume_shape
 from losses import spect_reconstruction_loss
 from main import batch_metric_scores
 from model import AAE, Discriminator
@@ -160,6 +161,16 @@ def should_validate(epoch, args):
     return (epoch + 1) % args.validation_interval == 0 or epoch == args.epochs - 1
 
 
+def _volume_channel_shape() -> tuple[int, int, int, int]:
+    """(C, D, H, W) tensor shape after dataset crop/pad."""
+    working = get_working_volume_shape()
+    return (1, *working)
+
+
+def _shape_label(shape: tuple[int, ...]) -> str:
+    return ",".join(str(int(x)) for x in shape)
+
+
 def save_checkpoint(model, optimizer, path, epoch, score):
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -185,8 +196,12 @@ def evaluate_reconstruction(model, split, args, out_csv):
         for volume, names in tqdm(loader, desc=f"reconstruction:{split}"):
             volume = torch.as_tensor(np.expand_dims(volume, axis=1), dtype=torch.float32, device=config.device)
             reconstructed = model(volume)
-            if tuple(reconstructed.shape[1:]) != (1, 160, 192, 160):
-                raise ValueError(f"Unexpected MRI reconstruction shape: {tuple(reconstructed.shape)}")
+            expected = _volume_channel_shape()
+            if tuple(reconstructed.shape[1:]) != expected:
+                raise ValueError(
+                    f"Unexpected MRI reconstruction shape: {tuple(reconstructed.shape)} "
+                    f"(expected {expected})"
+                )
             batch_psnr, batch_ssim = batch_metric_scores(volume, reconstructed)
             subject_id = subject_id_from_name(names)
             rows.append({"ID": subject_id, "split": split, "PSNR": batch_psnr, "SSIM": batch_ssim})
@@ -325,7 +340,8 @@ def encode_embeddings(args, path_map):
             for volume, names in tqdm(loader, desc=f"encode:mri_embeddings:{split}"):
                 volume = torch.as_tensor(np.expand_dims(volume, axis=1), dtype=torch.float32, device=config.device)
                 latent = model.encoder(volume)
-                if tuple(latent.shape[1:]) != (1, 40, 48, 40):
+                latent_shape = get_latent_shape()
+                if tuple(latent.shape[1:]) != (1, *latent_shape):
                     raise ValueError(f"Unexpected MRI embedding shape: {tuple(latent.shape)}")
                 subject_id = subject_id_from_name(names)
                 latent_np = latent[0, 0].detach().cpu().numpy().astype(np.float32)
@@ -338,7 +354,7 @@ def encode_embeddings(args, path_map):
                         "split": split,
                         "label": int(label_lookup[subject_id]),
                         "embedding_path": str(out_path),
-                        "embedding_shape": "1,40,48,40",
+                        "embedding_shape": _shape_label((1, *get_latent_shape())),
                     }
                 )
 
@@ -708,8 +724,10 @@ def write_run_config(args, path_map):
         "validation_interval": args.validation_interval,
         "early_stopping_patience": args.patience,
         "max_subjects_per_split": args.max_subjects_per_split,
-        "embedding_shape": "1,40,48,40",
-        "reconstruction_shape": "1,160,192,160",
+        "embedding_shape": _shape_label((1, *get_latent_shape())),
+        "reconstruction_shape": _shape_label(_volume_channel_shape()),
+        "volume_shape_on_disk": _shape_label(get_volume_shape()),
+        "working_volume_shape": _shape_label(get_working_volume_shape()),
         "embedding_eval_protocol": "train_original_internal_80_20",
         "future_diffusion_usage": {
             "FREEZE_MRI_ENCODER": "1",

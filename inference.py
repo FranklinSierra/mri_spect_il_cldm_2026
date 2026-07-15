@@ -35,6 +35,14 @@ import umap
 
 import config
 from code.roi_mask_utils import try_load_roi_mask_numpy
+from code.volume_shapes import (
+    clear_shape_cache,
+    crop_volume_to_raw_shape,
+    get_latent_shape,
+    get_volume_shape,
+    get_working_volume_shape,
+    parse_shape_triplet,
+)
 from dataset import TwoDataset, resolve_nifti_path
 from main import Diffusion, batch_metric_scores, batch_metric_scores_roi
 from model import AAE, MRIEncoder, UNet, LatentClsHead, build_unet
@@ -160,9 +168,12 @@ def load_mri_encoder_state_dict(checkpoint_path, device):
 
 def load_mri_encoder(mode, checkpoint_path, device):
     if mode == "raw":
+        print("=> MRI encoder mode raw: no checkpoint loaded")
         return None, None
     if checkpoint_path is None or not Path(checkpoint_path).exists():
         raise FileNotFoundError(f"Missing MRI encoder checkpoint for mode={mode}: {checkpoint_path}")
+    resolved = Path(checkpoint_path).resolve()
+    print(f"=> Loading checkpoint (MRI encoder): {resolved}")
     mri_encoder = MRIEncoder().to(device)
     mri_encoder.load_state_dict(
         load_mri_encoder_state_dict(checkpoint_path, device),
@@ -229,6 +240,12 @@ def resolve_unet_build_config(
     return unet_build_config_from_manifest(exp)
 
 
+def _manifest_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip() in {"1", "true", "True"}
+
+
 def apply_manifest_to_config(exp: str) -> dict | None:
     """Apply split paths and checkpoints from run_manifest.json to live config."""
     manifest_path = _RESULT_ROOT / exp.rstrip("/") / "run_manifest.json"
@@ -245,16 +262,40 @@ def apply_manifest_to_config(exp: str) -> dict | None:
         "ILCLDM_LATENT_ABETA": "latent_Abeta",
         "ILCLDM_AAE_CHECKPOINT": "CHECKPOINT_AAE",
         "ILCLDM_MRI_ENCODER_CHECKPOINT": "MRI_ENCODER_CHECKPOINT",
+        "ILCLDM_WHOLE_MRI": "whole_MRI",
+        "ILCLDM_WHOLE_ABETA": "whole_Abeta",
+        "ILCLDM_REFERENCE_NIFTI": "path",
+        "ILCLDM_LATENT_STATS_PATH": "LATENT_STATS_PATH",
+        "ILCLDM_ROI_MASK_PATH": "ROI_MASK_PATH",
     }
     for env_key, attr in env_to_attr.items():
         value = env.get(env_key) or cfg.get(attr)
         if value:
             setattr(config, attr, value)
+
+    skip_crop = env.get("ILCLDM_SKIP_CROP")
+    if skip_crop is not None:
+        config.SKIP_CROP = _manifest_bool(skip_crop)
+
+    roi_shape = env.get("ILCLDM_ROI_VOLUME_SHAPE")
+    if roi_shape:
+        config.ROI_VOLUME_SHAPE = parse_shape_triplet(str(roi_shape))
+
+    unet_roi = env.get("ILCLDM_UNET_ROI_CHANNEL")
+    if unet_roi is None and "UNET_ROI_CHANNEL" in cfg:
+        unet_roi = cfg["UNET_ROI_CHANNEL"]
+    if unet_roi is not None:
+        config.UNET_ROI_CHANNEL = _manifest_bool(unet_roi)
+        config.UNET_IN_CHANNELS = 2 + int(config.UNET_ROI_CHANNEL)
+
     calib = env.get("ILCLDM_LATENT_CALIBRATION")
     if calib is None and "LATENT_CALIBRATION" in cfg:
         calib = cfg["LATENT_CALIBRATION"]
     if calib is not None:
-        config.LATENT_CALIBRATION = calib if isinstance(calib, bool) else str(calib) == "1"
+        config.LATENT_CALIBRATION = _manifest_bool(calib)
+
+    if skip_crop is not None or roi_shape:
+        clear_shape_cache()
     return manifest
 
 
@@ -276,11 +317,15 @@ def load_models(exp, device):
         raise FileNotFoundError(f"Missing UNet checkpoint: {checkpoint_unet}")
 
     aae = AAE().to(device).eval()
-    load_checkpoint(str(checkpoint_aae), aae, None, config.learning_rate)
+    load_checkpoint(
+        str(checkpoint_aae), aae, None, config.learning_rate, model_name="SPECT AAE"
+    )
 
     use_roi_channel, in_channels = resolve_unet_build_config(exp, checkpoint_unet)
     unet = build_unet(in_channel=in_channels, use_roi_channel=use_roi_channel).to(device).eval()
-    load_checkpoint(str(checkpoint_unet), unet, None, config.learning_rate)
+    load_checkpoint(
+        str(checkpoint_unet), unet, None, config.learning_rate, model_name="UNet"
+    )
 
     return aae, unet, checkpoint_aae, checkpoint_unet
 
@@ -312,7 +357,8 @@ def extract_conditioning_embeddings(args, unet, device, out_dir):
             for i in range(cond.shape[0]):
                 subject_id = subject_id_from_name(names[i] if isinstance(names, (tuple, list)) else names)
                 cond_np = cond[i].detach().cpu().numpy().astype(np.float32)
-                if cond_np.shape != (1, 40, 48, 40):
+                latent_shape = get_latent_shape()
+                if cond_np.shape != (1, *latent_shape):
                     raise ValueError(f"Unexpected conditioning embedding shape for {subject_id}: {cond_np.shape}")
 
                 npz_path = rep_dir / f"{subject_id}.npz"
@@ -867,7 +913,8 @@ def save_synthetic_nifti(out_dir, split, subject_id, synthetic_spect):
     spect_dir = out_dir / "synthetic_spect" / split
     spect_dir.mkdir(parents=True, exist_ok=True)
     reference = nib.load(resolve_nifti_path(config.whole_MRI, subject_id))
-    image = nib.Nifti1Image(synthetic_spect.astype(np.float32), reference.affine, reference.header)
+    volume = crop_volume_to_raw_shape(synthetic_spect.astype(np.float32))
+    image = nib.Nifti1Image(volume, reference.affine, reference.header)
     out_path = spect_dir / f"{subject_id}.nii.gz"
     nib.save(image, out_path)
     return out_path
@@ -922,9 +969,13 @@ def generate_representations(args, split, aae, unet, mri_encoder, diffusion, out
             )
             synthetic_spect = decode_spect(aae, sampled_latent)
 
-        if tuple(sampled_latent.shape[1:]) != (1, 40, 48, 40):
+        vol_shape = get_working_volume_shape()
+        latent_shape = get_latent_shape()
+        latent_shape_label = f"1,{','.join(map(str, latent_shape))}"
+        spect_shape_label = f"1,{','.join(map(str, vol_shape))}"
+        if tuple(sampled_latent.shape[1:]) != (1, *latent_shape):
             raise ValueError(f"Unexpected latent shape: {tuple(sampled_latent.shape)}")
-        if tuple(synthetic_spect.shape[1:]) != (1, 160, 192, 160):
+        if tuple(synthetic_spect.shape[1:]) != (1, *vol_shape):
             raise ValueError(f"Unexpected synthetic SPECT shape: {tuple(synthetic_spect.shape)}")
 
         batch_size = sampled_latent.shape[0]
@@ -961,8 +1012,8 @@ def generate_representations(args, split, aae, unet, mri_encoder, diffusion, out
                     if args.save_synthetic_spect
                     and (out_dir / "synthetic_spect" / split / f"{subject_id}.nii.gz").exists()
                     else "",
-                    "latent_shape": "1,40,48,40",
-                    "synthetic_spect_shape": "1,160,192,160",
+                    "latent_shape": latent_shape_label,
+                    "synthetic_spect_shape": spect_shape_label,
                 })
                 metrics.append({
                     "ID": subject_id,
@@ -996,8 +1047,8 @@ def generate_representations(args, split, aae, unet, mri_encoder, diffusion, out
                 "label": label,
                 "representation_path": str(rep_path),
                 "synthetic_spect_path": spect_path,
-                "latent_shape": "1,40,48,40",
-                "synthetic_spect_shape": "1,160,192,160",
+                "latent_shape": latent_shape_label,
+                "synthetic_spect_shape": spect_shape_label,
             })
             metrics.append({
                 "ID": subject_id,
@@ -1247,12 +1298,8 @@ def main():
         device,
     )
     print(f"MRI encoder mode: {mri_encoder_mode}")
-    if mri_encoder_ckpt_resolved is not None:
-        print(f"MRI encoder checkpoint: {mri_encoder_ckpt_resolved}")
 
     cls_head = load_cls_head_for_exp(args.exp, device)
-    if cls_head is not None:
-        print("Loaded ClsHead.pth.tar for inference")
 
     if args.run_conditioning_audit:
         out_dir, decision = run_conditioning_audit(args, unet, device)

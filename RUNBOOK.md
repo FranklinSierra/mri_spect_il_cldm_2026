@@ -354,7 +354,7 @@ python3 inference.py --exp exp_nm_s2_frozen_h05_calib_roi3ch --run-id h05_calib_
   --save-synthetic-spect --splits train test
 ```
 
-Tras entrenar, añadir `h05_calib_roi3ch` a `WAVE_ORDER` en `code/stage2_experiments_report.ipynb` y re-ejecutar §6 (respeta `LATENT_CALIBRATION` por experimento).
+Tras entrenar e inferir, `h05_calib_roi3ch` está en `WAVE_ORDER` de `code/stage2_experiments_report.ipynb` — re-ejecutar el notebook (§6 respeta `LATENT_CALIBRATION` por experimento).
 
 ---
 
@@ -367,6 +367,7 @@ Segunda wave centrada en **`h05_roi3ch`** (3.er canal UNet, clasificación PD). 
 | `h05_roi3ch` | `exp_nm_s2_frozen_h05_roi3ch` | primario | baseline wave h05 (ROI 3ch) |
 | `abl_hight05_nhy` | `exp_nm_s2_frozen_abl_hight05_nhy` | **nhy_v1** | high-t 0.5, scratch (análogo `abl_hight05`) |
 | `h05_roi3ch_nhy` | `exp_nm_s2_frozen_h05_roi3ch_nhy` | **nhy_v1** | warm-start `abl_hight05_nhy` + ROI 3ch (análogo `h05_roi3ch`) |
+| `calib_roi3ch_nhy` | `exp_nm_s2_frozen_calib_roi3ch_nhy` | **nhy_v1** | calibración latente + ROI 3ch + t uniforme, scratch (análogo `calib_roi3ch_uni`) |
 | `roi3ch_nhy` | `exp_nm_s2_frozen_roi3ch_nhy` | **nhy_v1** | pipeline E1→E2→E3 completo, **sin** warm-start (baseline cold-start) |
 | `roi3ch_nolabel` | `exp_nm_s2_frozen_roi3ch_nolabel` | primario | `USE_TRAIN_LABEL=0`, warm-start `h05_roi3ch` |
 | `roi3ch_ht08` | `exp_nm_s2_frozen_roi3ch_ht08` | primario | `HIGH_T_SAMPLE_PROB=0.8`, warm-start `h05_roi3ch` |
@@ -433,7 +434,15 @@ python3 scripts/run_ablation.py h05_roi3ch_nhy --gpu <N>
 # → result/exp_nm_s2_frozen_h05_roi3ch_nhy/Unet.pth.tar
 ```
 
-**Paso 3b — E3 `roi3ch_nhy`** (cold-start, opcional / ya corrido):
+**Paso 3b — E3 `calib_roi3ch_nhy`** (calibrado + ROI 3ch, scratch; análogo `calib_roi3ch_uni` en split NHY):
+
+```bash
+python3 scripts/run_ablation.py calib_roi3ch_nhy --gpu <N>
+# → result/exp_nm_s2_frozen_calib_roi3ch_nhy/Unet.pth.tar
+# Stats calibración: data_info/latent_stats_latent_Abeta_nhy_v1.json (auto al entrenar)
+```
+
+**Paso 3c — E3 `roi3ch_nhy`** (cold-start, opcional / ya corrido):
 
 ```bash
 python3 scripts/run_ablation.py roi3ch_nhy --gpu <N>
@@ -452,6 +461,10 @@ python3 inference.py --exp exp_nm_s2_frozen_h05_roi3ch_nhy --run-id h05_roi3ch_n
 
 # Cold-start (baseline)
 python3 inference.py --exp exp_nm_s2_frozen_roi3ch_nhy --run-id roi3ch_nhy \
+  --mri-encoder-mode frozen --splits train test --save-synthetic-spect
+
+# Calibrado NHY (análogo calib_roi3ch_uni)
+python3 inference.py --exp exp_nm_s2_frozen_calib_roi3ch_nhy --run-id calib_roi3ch_nhy \
   --mri-encoder-mode frozen --splits train test --save-synthetic-spect
 ```
 
@@ -587,6 +600,73 @@ Requisitos: checkpoints E1 (`AAE`) y E2 (`Unet.pth.tar`) del experimento; latent
 
 ---
 
+## Experimento ROI (`data_rois`)
+
+Patches ya recortados (bbox `mask_basal_ganglia` + 15 vox). **No** se aplica el crop IL-CLDM `[10:170,…]` en carga (`ILCLDM_SKIP_CROP=1`). Shape en disco: `(105, 102, 102)`; el pipeline añade padding cero a `(108, 104, 104)` para que AAE/UNet preserven tamaño; grid latente `(27, 26, 26)`.
+
+### Preflight ROI
+
+```bash
+python3 scripts/preflight_data_rois.py
+python3 scripts/aggregate_roi_unet_mask.py   # una vez: data_rois/roi_mask_unet.nii.gz
+python3 scripts/smoke_test_rois.py
+```
+
+### Entorno ROI (E1 / E2)
+
+```bash
+source scripts/roi_profile_env.sh
+# o export manual: ILCLDM_SKIP_CROP=1, whole_* bajo data_rois/, etc.
+```
+
+| Variable | Valor ROI |
+|----------|-----------|
+| `ILCLDM_SKIP_CROP` | `1` |
+| `ILCLDM_WHOLE_MRI` / `ABETA` | `data_rois/whole_*` |
+| `ILCLDM_LATENT_ABETA` | `data_rois/latent_Abeta/` |
+| `ILCLDM_LATENT_STATS_PATH` | `data_info/latent_stats_latent_Abeta_rois.json` |
+| `ILCLDM_ROI_MASK_PATH` | `data_rois/roi_mask_unet.nii.gz` |
+| `ILCLDM_ROI_VOLUME_SHAPE` | `105,102,102` |
+
+### E1 ROI (desde cero, no reutilizar full-brain)
+
+```bash
+export CUDA_VISIBLE_DEVICES=6   # ajustar GPU
+bash scripts/run_e1_rois.sh
+```
+
+Equivalente paso a paso:
+
+```bash
+source scripts/roi_profile_env.sh
+export ILCLDM_EXP=exp_nm_s1_spect_rois/
+scripts/run_experiment.sh s1_spect exp_nm_s1_spect_rois
+python3 code/run_phase1_mri_experiment.py --exp exp_nm_s1_mri_rois
+python3 -c "from dataset import get_latent_stats; print(get_latent_stats())"
+```
+
+Checkpoints esperados:
+
+- `result/exp_nm_s1_spect_rois/AAE.pth.tar`
+- `result/exp_nm_s1_mri_rois/phase1_mri/checkpoints/MRI_AAE.pth.tar`
+- `data_rois/latent_Abeta/*.nii.gz` (train encode)
+- `data_info/latent_stats_latent_Abeta_rois.json`
+
+### E2 ROI — `calib_roi3ch_uni_rois`
+
+Receta: calibración latente `(z−μ)/σ`, desnormalizar antes del decoder; `t` uniforme; UNet scratch; 3.er canal ROI; label en train.
+
+```bash
+source scripts/roi_profile_env.sh
+python3 scripts/run_ablation.py calib_roi3ch_uni_rois --gpu 6
+```
+
+Registry: `experiments/registry.json` → `calib_roi3ch_uni_rois` (base `base_calib_roi3ch_uni_rois`).
+
+Resultados: `result/exp_nm_s2_frozen_calib_roi3ch_uni_rois/`.
+
+---
+
 ## Visualización rápida (z-score)
 
 ```bash
@@ -624,5 +704,6 @@ Usar escala simétrica para MRI; no filtrar solo `voxels > 0`.
 | `s2_mri_frozen_v2 [exp]` | LDM frozen v2 (latent loss, high-t, ROI, early stop latente) |
 | `s2_mri_finetune [exp]` | LDM, encoder MRI entrenable |
 | `abl <registry_key>` | Ablación frozen desde `experiments/registry.json` |
+| `bash scripts/run_e1_rois.sh` | E1 SPECT + MRI en `data_rois` + stats latentes ROI |
 
 Documentación ampliada: [DEVCONTAINER.md](DEVCONTAINER.md).

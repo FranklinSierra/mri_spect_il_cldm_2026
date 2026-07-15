@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 import config
 from code.roi_mask_utils import try_load_roi_mask_numpy, try_load_roi_mask_tensor
+from code.volume_shapes import get_latent_shape
 from dataset import OneDataset, TwoDataset, get_latent_stats
 from losses import spect_reconstruction_loss
 from model import AAE, Discriminator, EMA, MRIEncoder, UNet, LatentClsHead, build_unet
@@ -192,7 +193,8 @@ class Diffusion:
 
         with torch.no_grad():
             n = y.shape[0]
-            x = torch.randn((n, 1, 40, 48, 40)).to(config.device)
+            latent_shape = get_latent_shape()
+            x = torch.randn((n, 1, *latent_shape)).to(config.device)
             step_count = min(sampling_steps, self.noise_steps - 1)
             timesteps = torch.linspace(
                 self.noise_steps - 1,
