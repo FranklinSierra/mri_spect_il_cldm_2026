@@ -26,7 +26,49 @@ def resolve_nifti_path(root, image_id):
 def is_latent_nifti_root(root) -> bool:
     """Latent caches are not scalar volumes; do not z-score them on load."""
     norm = str(root).replace("\\", "/").rstrip("/")
-    return norm.endswith("latent_Abeta") or norm.endswith("latent_MRI") or "/latent_" in norm
+    return (
+        norm.endswith("latent_Abeta")
+        or norm.endswith("latent_Abeta_h64")
+        or norm.endswith("latent_MRI")
+        or "/latent_" in norm
+    )
+
+
+def resolve_latent_path(root, image_id):
+    """Resolve cached latent: prefer .npy (h64), else NIfTI."""
+    npy = os.path.join(root, f"{image_id}.npy")
+    if os.path.exists(npy):
+        return npy
+    return resolve_nifti_path(root, image_id)
+
+
+def load_diffusion_latent(root, image_id) -> np.ndarray:
+    """
+    Load SPECT latent for E2 according to ILCLDM_DIFFUSION_FEATURE_SPACE.
+
+    - z18k: NIfTI (D,H,W)
+    - h64: .npy (64,D,H,W)
+    - h64_gap1: .npy h64 → channel-mean → (1,D,H,W)
+    """
+    path = resolve_latent_path(root, image_id)
+    space = getattr(config, "DIFFUSION_FEATURE_SPACE", "z18k").strip().lower()
+    if path.endswith(".npy"):
+        arr = np.load(path).astype(np.float32)
+        if arr.ndim != 4:
+            raise ValueError(f"Expected h64 array (C,D,H,W) at {path}, got {arr.shape}")
+        if space == "h64_gap1":
+            return arr.mean(axis=0, keepdims=True).astype(np.float32)
+        if space == "h64":
+            return arr
+        raise ValueError(
+            f"NPy latent at {path} requires DIFFUSION_FEATURE_SPACE h64|h64_gap1, got {space!r}"
+        )
+    data = nifti_to_numpy(path, zscore=False)
+    if space not in ("z18k", "z18", ""):
+        # Allow classic NIfTI only for bottleneck space.
+        if space != "z18k":
+            raise ValueError(f"NIfTI latents only supported for z18k; got space={space!r} path={path}")
+    return np.asarray(data, dtype=np.float32)
 
 
 def zscore_volume(data: np.ndarray, eps: float = 1e-8) -> np.ndarray:
@@ -58,19 +100,28 @@ def nifti_to_numpy(file, zscore: bool | None = None):
 
 def _latent_files(latent_dir):
     d = Path(latent_dir)
-    return sorted(list(d.glob("*.nii")) + list(d.glob("*.nii.gz")))
+    return sorted(
+        list(d.glob("*.nii")) + list(d.glob("*.nii.gz")) + list(d.glob("*.npy"))
+    )
 
 
 def compute_latent_stats(latent_dir):
     """Global (pooled over all voxels/subjects) mean and std of cached latents."""
     files = _latent_files(latent_dir)
     if not files:
-        raise FileNotFoundError(f"No latent NIfTI found in {latent_dir}")
+        raise FileNotFoundError(f"No latent files found in {latent_dir}")
     total = 0.0
     total_sq = 0.0
     count = 0
+    space = getattr(config, "DIFFUSION_FEATURE_SPACE", "z18k").strip().lower()
     for path in files:
-        arr = np.asarray(nib.load(str(path)).get_fdata(), dtype=np.float64).ravel()
+        if path.suffix == ".npy":
+            arr = np.load(path).astype(np.float64)
+            if space == "h64_gap1" and arr.ndim == 4:
+                arr = arr.mean(axis=0, keepdims=True)
+            arr = arr.ravel()
+        else:
+            arr = np.asarray(nib.load(str(path)).get_fdata(), dtype=np.float64).ravel()
         total += float(arr.sum())
         total_sq += float(np.square(arr).sum())
         count += arr.size
@@ -228,14 +279,30 @@ class TwoDataset(Dataset):
 
     def __getitem__(self, index):
         image_id = self.images[index % self.len]
-        path_Abeta = resolve_nifti_path(self.root_Abeta, image_id)
-        name = os.path.basename(path_Abeta)
-        Abeta = nifti_to_numpy(path_Abeta)
         path_MRI = resolve_nifti_path(self.root_MRI, image_id)
         MRI = nifti_to_numpy(path_MRI)
         MRI = crop(MRI)
-        if not self.return_spect_volume and self.stage != "train":
-            Abeta = crop(Abeta)
+
+        if is_latent_nifti_root(self.root_Abeta):
+            Abeta = load_diffusion_latent(self.root_Abeta, image_id)
+            try:
+                name = os.path.basename(resolve_latent_path(self.root_Abeta, image_id))
+            except FileNotFoundError:
+                name = f"{image_id}.npy"
+        else:
+            path_Abeta = resolve_nifti_path(self.root_Abeta, image_id)
+            name = os.path.basename(path_Abeta)
+            Abeta = nifti_to_numpy(path_Abeta)
+            # ROI volumes must share MRI working-shape padding so encoder maps align
+            # (e.g. xmodal flatten). Latents keep a different spatial size and stay raw.
+            if getattr(config, "ROI_VOLUME_SHAPE", None):
+                from code.volume_shapes import get_volume_shape, get_working_volume_shape
+
+                abeta_shape = tuple(Abeta.shape[:3])
+                if abeta_shape in (get_volume_shape(), get_working_volume_shape()):
+                    Abeta = crop(Abeta)
+            elif not self.return_spect_volume and self.stage != "train":
+                Abeta = crop(Abeta)
 
         spect_volume = None
         if self.return_spect_volume:

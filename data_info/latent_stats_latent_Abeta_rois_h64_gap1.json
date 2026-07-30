@@ -1,0 +1,14 @@
+{
+  "mean": 0.2838972663978619,
+  "std": 0.20997019553170293,
+  "latent_dir": "data_rois/latent_Abeta_h64",
+  "n_files": 184,
+  "feature": "h64_gap1",
+  "shape_per_file": [
+    1,
+    27,
+    26,
+    26
+  ],
+  "note": "stats over channel-mean(h64)"
+}

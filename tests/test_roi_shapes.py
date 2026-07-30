@@ -59,3 +59,37 @@ def test_load_roi_latent_buffer_roi_profile(roi_env):
 
     buf = load_roi_latent_buffer(roi_env)
     assert tuple(buf.shape[-3:]) == get_latent_shape()
+
+
+def test_two_dataset_pads_spect_like_mri_on_train(roi_env, monkeypatch, tmp_path):
+    """Train-stage SPECT volumes must get the same ROI working-shape pad as MRI."""
+    import config
+    from code import volume_shapes
+    from dataset import TwoDataset
+
+    raw = (32, 32, 32)
+    working = volume_shapes.get_working_volume_shape()
+    mri_dir = tmp_path / "whole_MRI"
+    spect_dir = tmp_path / "whole_Abeta"
+    mri_dir.mkdir()
+    spect_dir.mkdir()
+    vol = np.ones(raw, dtype=np.float32)
+    nib.save(nib.Nifti1Image(vol, np.eye(4)), str(mri_dir / "9999.nii.gz"))
+    nib.save(nib.Nifti1Image(vol, np.eye(4)), str(spect_dir / "9999.nii.gz"))
+    list_path = tmp_path / "train.txt"
+    list_path.write_text("9999\n")
+    info_path = tmp_path / "data_info.csv"
+    info_path.write_text("ID,label\n9999,1\n")
+
+    monkeypatch.setattr("dataset.DATA_INFO_CSV", str(info_path))
+
+    ds = TwoDataset(
+        root_MRI=str(mri_dir),
+        root_Abeta=str(spect_dir),
+        task=str(list_path),
+        stage="train",
+    )
+    mri, spect, name, label = ds[0]
+    assert tuple(mri.shape) == working
+    assert tuple(spect.shape) == working
+    assert name.endswith("9999.nii.gz")

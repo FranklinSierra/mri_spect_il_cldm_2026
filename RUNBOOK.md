@@ -665,6 +665,78 @@ Registry: `experiments/registry.json` → `calib_roi3ch_uni_rois` (base `base_ca
 
 Resultados: `result/exp_nm_s2_frozen_calib_roi3ch_uni_rois/`.
 
+### E2 ROI + conditioner `xmodal_h64` (`xm64_z18` / `xm64_h64` / `xm64_h64_gap1`)
+
+Tres variantes aisladas del baseline `calib_roi3ch_uni_rois`. MRI encoder = checkpoint E1 `exp_nm_s1_mri_rois_xmodal_h64`. **No** modifican el run `calib_roi3ch_uni_rois`.
+
+| Clave registry | Espacio difusión | Notas |
+|----------------|------------------|-------|
+| `calib_roi3ch_uni_rois_xm64_z18` | bottleneck z18k (1ch) | Solo cambia MRI ckpt; mismos latentes `data_rois/latent_Abeta/` |
+| `calib_roi3ch_uni_rois_xm64_h64` | h64 (64ch) | Cache `data_rois/latent_Abeta_h64/`; UNet in=129; aux decode off |
+| `calib_roi3ch_uni_rois_xm64_h64_gap1` | channel-mean GAP → 1ch | Mismo cache h64; stats gap1; UNet como z18k |
+
+**Prerequisito h64** (ya ejecutado / re-ejecutable en GPU 7):
+
+```bash
+source scripts/roi_profile_env.sh
+CUDA_VISIBLE_DEVICES=7 bash scripts/encode_spect_h64_rois.sh
+# → data_rois/latent_Abeta_h64/*.npy
+# → data_info/latent_stats_latent_Abeta_rois_h64.json
+# → data_info/latent_stats_latent_Abeta_rois_h64_gap1.json
+```
+
+**Lanzar E2** (cuando se autorice; B=2 en registry):
+
+```bash
+source scripts/roi_profile_env.sh
+python3 scripts/run_ablation.py calib_roi3ch_uni_rois_xm64_z18 --gpu <N>
+python3 scripts/run_ablation.py calib_roi3ch_uni_rois_xm64_h64 --gpu <N>
+python3 scripts/run_ablation.py calib_roi3ch_uni_rois_xm64_h64_gap1 --gpu <N>
+```
+
+Flag: `ILCLDM_DIFFUSION_FEATURE_SPACE={z18k,h64,h64_gap1}`. Decode SPECT desde h64 (bonus): `ILCLDM_DIFFUSION_H64_DECODE_BONUS=1` (h64 → Conv64→1 frozen → decoder). Eval primaria: embeddings discriminativos, no PSNR.
+
+### E1 MRI contrastivo espacial (`data_rois`)
+
+Variantes de **E1 MRI** aisladas del baseline `exp_nm_s1_mri_rois`. Contrastiva **directa** sobre el mapa espacial (`L2(flatten)`), sin GAP ni proyector MLP. Prefijo: `exp_nm_s1_mri_rois_`. No reutilizar nombres cortos viejos (`…_supcon` / `…_xmodal` sin sufijo de features).
+
+| Clave corta | `--exp` | Modo | Features contrastivas |
+|-------------|---------|------|------------------------|
+| `supcon_z18k` | `exp_nm_s1_mri_rois_supcon_z18k` | SupCon | flatten bottleneck `(1,27,26,26)` → 18 252-D |
+| `supcon_h64` | `exp_nm_s1_mri_rois_supcon_h64` | SupCon | flatten pre-bottleneck `(64,27,26,26)` |
+| `xmodal_z18k` | `exp_nm_s1_mri_rois_xmodal_z18k` | InfoNCE | MRI+SPECT flatten bottleneck 18 252-D |
+| `xmodal_h64` | `exp_nm_s1_mri_rois_xmodal_h64` | InfoNCE | MRI+SPECT flatten mapa 64-ch |
+
+Baseline recon: `exp_nm_s1_mri_rois`.
+
+**Prerrequisitos:**
+
+- `source scripts/roi_profile_env.sh`
+- E1 SPECT ROI: `result/exp_nm_s1_spect_rois/AAE.pth.tar` (obligatorio para xmodal)
+- Warm-start: `result/exp_nm_s1_mri_rois/phase1_mri/checkpoints/MRI_AAE.pth.tar`
+
+**SupCon** (etiqueta clínica; batches 4+4; positivos = misma clase):
+
+```bash
+source scripts/roi_profile_env.sh
+CUDA_VISIBLE_DEVICES=<N> bash scripts/run_e1_mri_rois_supcon_z18k.sh
+# o: bash scripts/run_e1_mri_rois_supcon_h64.sh
+```
+
+**Cross-modal** (pares mismo ID; SPECT frozen; sin balance por label; 1 positivo + 7 negativos con B=8):
+
+```bash
+source scripts/roi_profile_env.sh
+CUDA_VISIBLE_DEVICES=<N> bash scripts/run_e1_mri_rois_xmodal_z18k.sh
+# o: bash scripts/run_e1_mri_rois_xmodal_h64.sh
+```
+
+**Defaults:** `batch_size=8`, `λ=20`, `τ=0.5` (`--contrastive-temp`), `--contrastive-features {z18k,h64}`, `projector=false`. Checkpoint por **mínimo `val_contrastive_loss`** (`selection_metric=neg_val_contrastive_loss`). Eval/clasificación sobre el mismo flatten que la loss. Override: `BATCH_SIZE=`, `SUPCON_LAMBDA=` / `XMODAL_LAMBDA=`, `CONTRASTIVE_TEMP=`.
+
+**Salidas:** `result/<exp>/phase1_mri/` (`run_config.json` con `contrastive_features`, `contrastive_temp`, `projector`); embeddings `z18k` como NIfTI, `h64` como `.npy`; retrieval xmodal en `…/classification/crossmodal_retrieval.json`.
+
+**Criterios:** `val_contrastive_loss` ≪ chance (`ln(B)` / `ln(B−1)`); SupCon within-cos < between-cos o bal.acc > baseline; xmodal top-1 retrieval > azar. Prioridad analítica: **z18k**.
+
 ---
 
 ## Visualización rápida (z-score)

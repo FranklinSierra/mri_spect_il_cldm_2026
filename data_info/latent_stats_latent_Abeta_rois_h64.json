@@ -1,0 +1,13 @@
+{
+  "mean": 0.2838972664119273,
+  "std": 0.6580527313429158,
+  "latent_dir": "data_rois/latent_Abeta_h64",
+  "n_files": 184,
+  "feature": "h64",
+  "shape_per_file": [
+    64,
+    27,
+    26,
+    26
+  ]
+}

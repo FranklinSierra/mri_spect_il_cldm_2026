@@ -78,10 +78,14 @@ class Encoder(nn.Module):
         layers.append(nn.ReLU())
         layers.append(nn.Conv3d(channels[-1], latent_dim, 3, 1, 1))
         self.model = nn.Sequential(*layers)
-       
-    def forward(self, x):
-        out = self.model(x)
-        return out
+
+    def forward(self, x, return_hidden: bool = False):
+        # Last layer is Conv3d(64 -> latent_dim); preceding map is h64.
+        h64 = self.model[:-1](x)
+        latent = self.model[-1](h64)
+        if return_hidden:
+            return latent, h64
+        return latent
 
 
 class MRIEncoder(Encoder):
@@ -443,14 +447,18 @@ class LatentClsHead(nn.Module):
         return self.net(flat).squeeze(1)
 
 
-def build_unet(in_channel=None, use_roi_channel=None):
+def build_unet(in_channel=None, use_roi_channel=None, out_channel=None):
     """Construct UNet; opt-in ROI input channel via ILCLDM_UNET_ROI_CHANNEL."""
+    from code.diffusion_features import diffusion_channels, unet_in_channels
+
     if use_roi_channel is None:
         use_roi_channel = config.UNET_ROI_CHANNEL
     if in_channel is None:
-        in_channel = 2 + int(use_roi_channel)
+        in_channel = unet_in_channels(use_roi=use_roi_channel)
+    if out_channel is None:
+        out_channel = diffusion_channels()
     latent_shape = get_latent_shape()
-    net = UNet(in_channel=in_channel, image_size=latent_shape[0])
+    net = UNet(in_channel=in_channel, out_channel=out_channel, image_size=latent_shape[0])
     if use_roi_channel:
         from code.roi_mask_utils import load_roi_latent_buffer
 

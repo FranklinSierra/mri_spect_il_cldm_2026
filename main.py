@@ -15,6 +15,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import config
+from code.diffusion_features import (
+    batch_latent_to_tensor,
+    decode_h64_via_bottleneck,
+    encode_mri_condition,
+    resolve_diffusion_feature_space,
+)
 from code.roi_mask_utils import try_load_roi_mask_numpy, try_load_roi_mask_tensor
 from code.volume_shapes import get_latent_shape
 from dataset import OneDataset, TwoDataset, get_latent_stats
@@ -32,6 +38,16 @@ from utils import (
 
 import warnings
 warnings.filterwarnings("ignore")
+
+
+def _decode_sampled_latent(aae_model, sampled_latent):
+    """Decode diffusion output; h64 uses optional Conv64→1 bonus path."""
+    space = resolve_diffusion_feature_space()
+    if space == "h64":
+        if not getattr(config, "DIFFUSION_H64_DECODE_BONUS", False):
+            return None
+        return decode_h64_via_bottleneck(aae_model, sampled_latent)
+    return aae_model.decoder(sampled_latent)
 
 def should_validate(epoch):
     return (epoch + 1) % config.validation_interval == 0 or epoch == config.epochs - 1
@@ -194,7 +210,8 @@ class Diffusion:
         with torch.no_grad():
             n = y.shape[0]
             latent_shape = get_latent_shape()
-            x = torch.randn((n, 1, *latent_shape)).to(config.device)
+            channels = int(getattr(config, "DIFFUSION_CHANNELS", 1))
+            x = torch.randn((n, channels, *latent_shape)).to(config.device)
             step_count = min(sampling_steps, self.noise_steps - 1)
             timesteps = torch.linspace(
                 self.noise_steps - 1,
@@ -265,23 +282,36 @@ def evaluate_ldm_split(
         Abeta_tensor = torch.tensor(
             np.expand_dims(Abeta, axis=1), device=config.device, dtype=torch.float32
         )
+        feat_space = resolve_diffusion_feature_space()
 
         with torch.no_grad():
             if mri_encoder is not None:
-                MRI_cond = mri_encoder(MRI)
+                MRI_cond = encode_mri_condition(mri_encoder, MRI, feat_space)
                 sampled_latent = diffusion.sample(
                     lambda x, y, t: ema_Unet(x, y, t, precomputed_condition=True),
                     MRI_cond,
                 )
             else:
                 sampled_latent = diffusion.sample(ema_Unet, MRI)
-            syn_Abeta = aae_model.decoder(sampled_latent)
 
             if track_latent:
-                z_gt = aae_model.encoder(Abeta_tensor)
+                if feat_space == "h64":
+                    _z, z_gt = aae_model.encoder(Abeta_tensor, return_hidden=True)
+                elif feat_space == "h64_gap1":
+                    from code.diffusion_features import channel_mean_to_one
+
+                    _z, h64 = aae_model.encoder(Abeta_tensor, return_hidden=True)
+                    z_gt = channel_mean_to_one(h64)
+                else:
+                    z_gt = aae_model.encoder(Abeta_tensor)
                 latent_mse, latent_mae = batch_latent_metric_scores(sampled_latent, z_gt)
                 latent_mse_total += latent_mse
                 latent_mae_total += latent_mae
+
+            syn_Abeta = _decode_sampled_latent(aae_model, sampled_latent)
+
+        if syn_Abeta is None:
+            continue
 
         batch_psnr, batch_ssim = batch_metric_scores(Abeta, syn_Abeta)
         psnr_total += batch_psnr
@@ -528,7 +558,9 @@ def evaluate_cls_balanced_accuracy(diffusion, ema_unet, aae_model, mri_encoder, 
                 t = diffusion.sample_timesteps(latent_Abeta.shape[0]).to(config.device)
             x_t, noise = diffusion.noise_images(latent_Abeta, t)
             if mri_encoder is not None:
-                MRI_cond = mri_encoder(MRI)
+                MRI_cond = encode_mri_condition(
+                    mri_encoder, MRI, resolve_diffusion_feature_space()
+                )
                 predicted_noise = ema_unet(x_t, MRI_cond, t, None, precomputed_condition=True)
             else:
                 predicted_noise = ema_unet(x_t, MRI, t, None)
@@ -668,8 +700,8 @@ def train_LDM():
             label = label.to(config.device)
             train_label = label if config.USE_TRAIN_LABEL else None
             MRI = torch.tensor(np.expand_dims(MRI, axis=1), device=config.device, dtype=torch.float32)
-            latent_Abeta = torch.tensor(
-                np.expand_dims(latent_Abeta, axis=1), device=config.device, dtype=torch.float32
+            latent_Abeta = batch_latent_to_tensor(
+                latent_Abeta, config.DIFFUSION_CHANNELS, config.device
             )
             # Calibrate cached raw latent into diffusion space (identity if disabled).
             latent_Abeta = diffusion.normalize_latent(latent_Abeta)
@@ -679,19 +711,22 @@ def train_LDM():
             else:
                 t = diffusion.sample_timesteps(latent_Abeta.shape[0]).to(config.device)
             x_t, noise = diffusion.noise_images(latent_Abeta, t)
+            feat_space = resolve_diffusion_feature_space()
             if mri_encoder is not None:
                 if mri_encoder_trainable:
-                    MRI_cond = mri_encoder(MRI)
+                    MRI_cond = encode_mri_condition(mri_encoder, MRI, feat_space)
                 else:
                     with torch.no_grad():
-                        MRI_cond = mri_encoder(MRI)
+                        MRI_cond = encode_mri_condition(mri_encoder, MRI, feat_space)
                 predicted_noise = Unet(x_t, MRI_cond, t, train_label, precomputed_condition=True)
             else:
                 predicted_noise = Unet(x_t, MRI, t, train_label)
             loss = L2(predicted_noise, noise)
 
             high_t_batch = (t > config.HIGH_T_THRESHOLD).all().item()
-            apply_aux = use_aux_image and (
+            # Aux image decode only for bottleneck spaces (or h64 with bonus flag).
+            can_aux_decode = feat_space != "h64" or getattr(config, "DIFFUSION_H64_DECODE_BONUS", False)
+            apply_aux = use_aux_image and can_aux_decode and (
                 high_t_batch
                 or (global_step % config.AUX_IMAGE_EVERY_N == 0)
             )
@@ -705,25 +740,29 @@ def train_LDM():
                 latent_steps += 1
 
             if apply_aux:
-                spect_pred = model.decoder(diffusion.denormalize_latent(x0_hat))
-                spect_gt = torch.tensor(
-                    np.expand_dims(spect_volume, axis=1), device=config.device, dtype=torch.float32
-                )
-                aux_loss, _ = spect_reconstruction_loss(
-                    spect_gt,
-                    spect_pred,
-                    use_weighted=config.USE_WEIGHTED_RECON_LOSS,
-                    use_tail=config.USE_TAIL_RECON_LOSS,
-                    weighted_alpha=config.WEIGHTED_RECON_ALPHA,
-                    z_threshold=config.WEIGHTED_Z_THRESHOLD,
-                    tail_fraction=config.TAIL_RECON_FRACTION,
-                    tail_beta=config.TAIL_RECON_BETA,
-                    roi_mask=roi_mask_tensor,
-                    roi_alpha=config.ROI_WEIGHT_ALPHA if roi_mask_tensor is not None else 0.0,
-                )
-                loss = loss + config.AUX_IMAGE_LAMBDA * aux_loss
-                aux_loss_epoch += aux_loss.detach()
-                aux_steps += 1
+                denorm = diffusion.denormalize_latent(x0_hat)
+                spect_pred = _decode_sampled_latent(model, denorm)
+                if spect_pred is None:
+                    apply_aux = False
+                else:
+                    spect_gt = torch.tensor(
+                        np.expand_dims(spect_volume, axis=1), device=config.device, dtype=torch.float32
+                    )
+                    aux_loss, _ = spect_reconstruction_loss(
+                        spect_gt,
+                        spect_pred,
+                        use_weighted=config.USE_WEIGHTED_RECON_LOSS,
+                        use_tail=config.USE_TAIL_RECON_LOSS,
+                        weighted_alpha=config.WEIGHTED_RECON_ALPHA,
+                        z_threshold=config.WEIGHTED_Z_THRESHOLD,
+                        tail_fraction=config.TAIL_RECON_FRACTION,
+                        tail_beta=config.TAIL_RECON_BETA,
+                        roi_mask=roi_mask_tensor,
+                        roi_alpha=config.ROI_WEIGHT_ALPHA if roi_mask_tensor is not None else 0.0,
+                    )
+                    loss = loss + config.AUX_IMAGE_LAMBDA * aux_loss
+                    aux_loss_epoch += aux_loss.detach()
+                    aux_steps += 1
 
             if use_cls_loss and cls_head is not None and x0_hat is not None:
                 label_flat = label.reshape(-1).float()

@@ -7,7 +7,7 @@ sampling_steps = int(os.getenv("ILCLDM_SAMPLING_STEPS", "100"))
 ddim_eta = float(os.getenv("ILCLDM_DDIM_ETA", "0.0"))
 latent_dim = 1
 learning_rate = float(os.getenv("ILCLDM_LR", "1e-4"))
-batch_size = int(os.getenv("ILCLDM_BATCH_SIZE", "2"))
+batch_size = int(os.getenv("ILCLDM_BATCH_SIZE", "8"))
 numworker = 0
 epochs = int(os.getenv("ILCLDM_EPOCHS", "1000"))
 validation_interval = int(os.getenv("ILCLDM_VALIDATION_INTERVAL", "5"))
@@ -68,6 +68,7 @@ EARLY_STOP_LATENT_METRIC = os.getenv("ILCLDM_EARLY_STOP_LATENT_METRIC", "0") == 
 # Stage-2 h05 wave: training/inference options
 USE_TRAIN_LABEL = os.getenv("ILCLDM_USE_TRAIN_LABEL", "1") == "1"
 UNET_ROI_CHANNEL = os.getenv("ILCLDM_UNET_ROI_CHANNEL", "0") == "1"
+# Placeholder; recomputed below after DIFFUSION_FEATURE_SPACE is known.
 UNET_IN_CHANNELS = 2 + int(UNET_ROI_CHANNEL)
 UNET_INIT_CHECKPOINT = os.getenv("ILCLDM_UNET_INIT_CHECKPOINT", "").strip()
 REGISTRY_KEY = os.getenv("ILCLDM_REGISTRY_KEY", "").strip()
@@ -98,6 +99,30 @@ FREEZE_MRI_ENCODER = os.getenv("ILCLDM_FREEZE_MRI_ENCODER", "0") == "1"
 MRI_ENCODER_MODE = os.getenv("ILCLDM_MRI_ENCODER_MODE", "").strip().lower()
 MRI_ENCODER_CHECKPOINT = os.getenv("ILCLDM_MRI_ENCODER_CHECKPOINT", CHECKPOINT_MRI_ENCODER)
 MRI_ENCODER_FINETUNE_LR_SCALE = float(os.getenv("ILCLDM_MRI_ENCODER_FINETUNE_LR_SCALE", "0.25"))
+
+# Phase-1 MRI contrastive training (recon | supcon | xmodal)
+MRI_TRAINING_MODE = os.getenv("ILCLDM_MRI_TRAINING_MODE", "recon").strip().lower()
+SUPCON_LAMBDA = float(os.getenv("ILCLDM_SUPCON_LAMBDA", "20"))
+XMODAL_LAMBDA = float(os.getenv("ILCLDM_XMODAL_LAMBDA", "20"))
+CONTRASTIVE_TEMP = float(os.getenv("ILCLDM_CONTRASTIVE_TEMP", "0.5"))
+CONTRASTIVE_PROJ_DIM = int(os.getenv("ILCLDM_CONTRASTIVE_PROJ_DIM", "128"))
+CONTRASTIVE_FEATURES = os.getenv("ILCLDM_CONTRASTIVE_FEATURES", "z18k").strip().lower()
+MRI_INIT_CHECKPOINT = os.getenv("ILCLDM_MRI_INIT_CHECKPOINT", "").strip()
+SPECT_AAE_CHECKPOINT = os.getenv("ILCLDM_SPECT_AAE_CHECKPOINT", "").strip()
+
+# Stage-2 gated latent feature space (default = classic bottleneck z18k).
+# h64: diffuse 64-ch pre-bottleneck maps; h64_gap1: channel-mean → 1ch then diffuse.
+DIFFUSION_FEATURE_SPACE = os.getenv("ILCLDM_DIFFUSION_FEATURE_SPACE", "z18k").strip().lower()
+if DIFFUSION_FEATURE_SPACE in ("", "z", "z18", "latent", "bottleneck"):
+    DIFFUSION_FEATURE_SPACE = "z18k"
+if DIFFUSION_FEATURE_SPACE not in ("z18k", "h64", "h64_gap1"):
+    raise ValueError(
+        f"ILCLDM_DIFFUSION_FEATURE_SPACE must be z18k|h64|h64_gap1, got {DIFFUSION_FEATURE_SPACE!r}"
+    )
+DIFFUSION_CHANNELS = 64 if DIFFUSION_FEATURE_SPACE == "h64" else 1
+UNET_IN_CHANNELS = 2 * DIFFUSION_CHANNELS + int(UNET_ROI_CHANNEL)
+# Optional bonus decode path for h64 → Conv64→1 → SPECT decoder (off by default).
+DIFFUSION_H64_DECODE_BONUS = os.getenv("ILCLDM_DIFFUSION_H64_DECODE_BONUS", "0") == "1"
 
 train = os.getenv("ILCLDM_TRAIN_FILE", "data_info/train.txt")
 validation = os.getenv("ILCLDM_VALIDATION_FILE", "data_info/validation.txt")

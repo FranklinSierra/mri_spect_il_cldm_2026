@@ -889,7 +889,14 @@ def build_loader(split, batch_size, max_subjects=None):
 
 
 def decode_spect(aae, sampled_latent):
+    from code.diffusion_features import decode_h64_via_bottleneck, resolve_diffusion_feature_space
+
     with torch.no_grad():
+        space = resolve_diffusion_feature_space()
+        if space == "h64":
+            if not getattr(config, "DIFFUSION_H64_DECODE_BONUS", False):
+                return None
+            return decode_h64_via_bottleneck(aae, sampled_latent)
         return aae.decoder(sampled_latent)
 
 
@@ -921,8 +928,10 @@ def save_synthetic_nifti(out_dir, split, subject_id, synthetic_spect):
 
 
 def sample_latents(diffusion, unet, mri_encoder, MRI, sampling_steps, eta):
+    from code.diffusion_features import encode_mri_condition, resolve_diffusion_feature_space
+
     if mri_encoder is not None:
-        MRI_cond = mri_encoder(MRI)
+        MRI_cond = encode_mri_condition(mri_encoder, MRI, resolve_diffusion_feature_space())
         return diffusion.sample(
             lambda x, y, t: unet(x, y, t, precomputed_condition=True),
             MRI_cond,
@@ -971,11 +980,12 @@ def generate_representations(args, split, aae, unet, mri_encoder, diffusion, out
 
         vol_shape = get_working_volume_shape()
         latent_shape = get_latent_shape()
-        latent_shape_label = f"1,{','.join(map(str, latent_shape))}"
+        channels = int(getattr(config, "DIFFUSION_CHANNELS", 1))
+        latent_shape_label = f"{channels},{','.join(map(str, latent_shape))}"
         spect_shape_label = f"1,{','.join(map(str, vol_shape))}"
-        if tuple(sampled_latent.shape[1:]) != (1, *latent_shape):
+        if tuple(sampled_latent.shape[1:]) != (channels, *latent_shape):
             raise ValueError(f"Unexpected latent shape: {tuple(sampled_latent.shape)}")
-        if tuple(synthetic_spect.shape[1:]) != (1, *vol_shape):
+        if synthetic_spect is not None and tuple(synthetic_spect.shape[1:]) != (1, *vol_shape):
             raise ValueError(f"Unexpected synthetic SPECT shape: {tuple(synthetic_spect.shape)}")
 
         batch_size = sampled_latent.shape[0]
@@ -1024,6 +1034,21 @@ def generate_representations(args, split, aae, unet, mri_encoder, diffusion, out
                 continue
 
             latent_np = sampled_latent[i].detach().cpu().numpy()
+            if synthetic_spect is None:
+                rep_path = save_subject_representation(
+                    out_dir, split, subject_id, label, latent_np, None
+                )
+                rows.append({
+                    "ID": subject_id,
+                    "split": split,
+                    "label": label,
+                    "representation_path": str(rep_path),
+                    "synthetic_spect_path": "",
+                    "latent_shape": latent_shape_label,
+                    "synthetic_spect_shape": "",
+                })
+                continue
+
             synthetic_np = synthetic_spect[i, 0].detach().cpu().numpy()
             target_np = Abeta[i].detach().cpu()
             pred_np = synthetic_spect[i].detach().cpu()
