@@ -83,19 +83,78 @@ def zscore_volume(data: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     return data.astype(np.float32, copy=False)
 
 
-def nifti_to_numpy(file, zscore: bool | None = None):
+def zscore_volume_foreground(data: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    """Z-score using mean/std of voxels > 0; apply affine to the full volume."""
+    data = np.asarray(data, dtype=np.float32)
+    mask = data > 0
+    if not np.any(mask):
+        return data - float(np.mean(data))
+    fg = data[mask]
+    mean = float(np.mean(fg))
+    std = float(np.std(fg))
+    if std > eps:
+        data = (data - mean) / std
+    else:
+        data = data - mean
+    return data.astype(np.float32, copy=False)
+
+
+def infer_image_modality(path: str) -> str | None:
+    """Return 'mri', 'spect', or None (latent / unknown) from a NIfTI path."""
+    norm = str(path).replace("\\", "/").lower()
+    parent = os.path.dirname(norm).rstrip("/")
+    if is_latent_nifti_root(parent):
+        return None
+    if parent.endswith("whole_mri") or "/whole_mri/" in norm or norm.rstrip("/").endswith("whole_mri"):
+        return "mri"
+    if (
+        parent.endswith("whole_abeta")
+        or "/whole_abeta/" in norm
+        or norm.rstrip("/").endswith("whole_abeta")
+    ):
+        return "spect"
+    return None
+
+
+def apply_image_volume_norm(
+    data: np.ndarray,
+    *,
+    modality: str | None = None,
+    norm_mode: str | None = None,
+) -> np.ndarray:
+    """
+    Apply IMAGE_VOLUME_NORM policy to a scalar image volume.
+
+    - legacy: z-score over all voxels (any modality).
+    - v2load + mri: z-score with stats from voxels > 0.
+    - v2load + spect: return float32 unchanged.
+    """
+    mode = (norm_mode or getattr(config, "IMAGE_VOLUME_NORM", "legacy")).strip().lower()
+    data = np.asarray(data, dtype=np.float32)
+    if mode == "v2load":
+        if modality == "mri":
+            return zscore_volume_foreground(data)
+        if modality == "spect":
+            return data
+        # Unknown modality under v2load: keep legacy z-score for safety.
+        return zscore_volume(data)
+    return zscore_volume(data)
+
+
+def nifti_to_numpy(file, zscore: bool | None = None, modality: str | None = None):
     """
     Load a NIfTI array for the training pipeline.
 
-    Applies per-volume z-score for image roots (whole_MRI / whole_Abeta).
+    Image roots (whole_MRI / whole_Abeta) follow config.IMAGE_VOLUME_NORM.
     Latent NIfTI under latent_Abeta or latent_MRI are loaded without z-score.
     """
     data = nib.load(file).get_fdata()
     if zscore is None:
         zscore = not is_latent_nifti_root(os.path.dirname(file))
-    if zscore:
-        return zscore_volume(data)
-    return np.asarray(data, dtype=np.float32)
+    if not zscore:
+        return np.asarray(data, dtype=np.float32)
+    mod = modality if modality is not None else infer_image_modality(file)
+    return apply_image_volume_norm(data, modality=mod)
 
 
 def _latent_files(latent_dir):

@@ -26,7 +26,6 @@ ID,label,split
 3591,1,train
 3593,1,train
 3759,0,test
-3765,0,train
 3767,0,train
 3769,0,train
 3806,0,test
@@ -34,7 +33,6 @@ ID,label,split
 3824,1,test
 3832,1,test
 3857,0,train
-3863,1,test
 3102,1,train
 3104,0,train
 3105,1,test
@@ -107,7 +105,6 @@ ID,label,split
 3369,0,train
 3370,0,test
 3371,1,train
-3372,1,train
 3373,1,train
 3375,1,train
 3376,1,train

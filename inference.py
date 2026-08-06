@@ -273,6 +273,17 @@ def apply_manifest_to_config(exp: str) -> dict | None:
         if value:
             setattr(config, attr, value)
 
+    image_norm = env.get("ILCLDM_IMAGE_VOLUME_NORM")
+    if image_norm is None and "IMAGE_VOLUME_NORM" in cfg:
+        image_norm = cfg["IMAGE_VOLUME_NORM"]
+    if image_norm is not None and str(image_norm).strip():
+        mode = str(image_norm).strip().lower()
+        if mode not in ("legacy", "v2load"):
+            raise ValueError(
+                f"IMAGE_VOLUME_NORM in run_manifest must be legacy|v2load, got {mode!r}"
+            )
+        config.IMAGE_VOLUME_NORM = mode
+
     skip_crop = env.get("ILCLDM_SKIP_CROP")
     if skip_crop is not None:
         config.SKIP_CROP = _manifest_bool(skip_crop)

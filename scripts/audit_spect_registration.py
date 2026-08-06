@@ -61,10 +61,6 @@ DEFAULT_FLAGGED = [
     3593, 3826, 3829, 3830, 3834, 3838,
 ]
 
-# 3863 is excluded definitively: its SPECT is truncated (data missing), not
-# merely displaced, so rigid correction cannot recover it.
-EXCLUDE_IDS = {3863}
-
 # Median COM(SPECT uptake > p90) - COM(atlas mask), measured over the 166 "OK"
 # subjects (full-MNI voxel space). std ~ [1.5, 3.6, 6.8], i.e. a tight, stable
 # landmark relationship. Recompute with --recompute-reference if the cohort
@@ -315,8 +311,7 @@ def load_flagged_ids(summary_csv: Path) -> list[str]:
         for row in csv.DictReader(f):
             if row.get("fail_type", "OK") != "OK":
                 sid = int(float(row["ID"]))
-                if sid not in EXCLUDE_IDS:
-                    ids.append(str(sid))
+                ids.append(str(sid))
     return ids or [str(i) for i in DEFAULT_FLAGGED]
 
 
@@ -381,7 +376,6 @@ def main() -> int:
         )
 
     ids = args.ids if args.ids else load_flagged_ids(args.summary_csv)
-    ids = [s for s in ids if int(float(s)) not in EXCLUDE_IDS]
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     args.fig_dir.mkdir(parents=True, exist_ok=True)
@@ -392,7 +386,6 @@ def main() -> int:
     rows = []
     print(f"Atlas mask COM (MNI vox): {np.round(mask_com, 1)}")
     print(f"REF_UPTAKE_OFFSET: {np.round(REF_UPTAKE_OFFSET, 2)}")
-    print(f"Excluded (definitive): {sorted(EXCLUDE_IDS)}")
     print(f"Processing {len(ids)} subjects -> {args.out_dir} (non-destructive)\n")
 
     for sid in ids:
@@ -464,7 +457,7 @@ def main() -> int:
     print(f"\nCorrected volumes: {args.out_dir}")
     print(f"Overlays + metrics: {args.fig_dir}")
     print("\nIMPORTANTE: whole_Abeta NO fue modificado. Valida los overlays antes")
-    print("de sustituir cualquier volumen. 3863 excluido definitivamente.")
+    print("de sustituir cualquier volumen.")
     return 0
 
 

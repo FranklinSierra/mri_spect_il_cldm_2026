@@ -1,10 +1,10 @@
 {
   "split_profile": "nhy_v1",
   "seed": 42,
-  "test_fraction": 0.1956521739130435,
-  "n_total": 184,
-  "n_train": 148,
-  "n_test": 36,
+  "test_fraction": 0.19337016574585636,
+  "n_total": 181,
+  "n_train": 146,
+  "n_test": 35,
   "stratification": [
     "control",
     "pd_nhy1",
@@ -21,8 +21,7 @@
       "3759",
       "3806",
       "3824",
-      "3832",
-      "3863"
+      "3832"
     ],
     "moved_train_to_test": [
       "3102",
@@ -80,7 +79,6 @@
       "3368",
       "3369",
       "3371",
-      "3372",
       "3373",
       "3375",
       "3376",
@@ -149,33 +147,33 @@
       "4067",
       "4139"
     ],
-    "n_moved_test_to_train": 11,
-    "n_moved_train_to_test": 123
+    "n_moved_test_to_train": 10,
+    "n_moved_train_to_test": 122
   },
   "distribution": {
     "nhy_v1_train": {
-      "n": 148,
-      "control": 59,
-      "pd_nhy1": 42,
+      "n": 146,
+      "control": 58,
+      "pd_nhy1": 41,
       "pd_nhy2": 47
     },
     "nhy_v1_test": {
-      "n": 36,
+      "n": 35,
       "control": 14,
       "pd_nhy1": 10,
-      "pd_nhy2": 12
+      "pd_nhy2": 11
     },
     "primary_train": {
-      "n": 148,
+      "n": 147,
       "control": 58,
-      "pd_nhy1": 43,
+      "pd_nhy1": 42,
       "pd_nhy2": 47
     },
     "primary_test": {
-      "n": 36,
-      "control": 15,
+      "n": 34,
+      "control": 14,
       "pd_nhy1": 9,
-      "pd_nhy2": 12
+      "pd_nhy2": 11
     }
   },
   "paths": {

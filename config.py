@@ -47,6 +47,15 @@ LATENT_MEAN = float(_env_latent_mean) if _env_latent_mean else None
 LATENT_STD = float(_env_latent_std) if _env_latent_std else None
 LATENT_STATS_PATH = os.getenv("ILCLDM_LATENT_STATS_PATH", "").strip()
 
+# Image-volume load normalization for whole_MRI / whole_Abeta (not latents).
+# legacy: per-volume z-score over all voxels (MRI + SPECT).
+# v2load: MRI z-score using voxels > 0 only; SPECT left as-is (region-normalized).
+IMAGE_VOLUME_NORM = os.getenv("ILCLDM_IMAGE_VOLUME_NORM", "legacy").strip().lower() or "legacy"
+if IMAGE_VOLUME_NORM not in ("legacy", "v2load"):
+    raise ValueError(
+        f"ILCLDM_IMAGE_VOLUME_NORM must be legacy|v2load, got {IMAGE_VOLUME_NORM!r}"
+    )
+
 # ROI patch profile (data_rois): skip IL-CLDM crop(); volumes already cropped on disk.
 SKIP_CROP = os.getenv("ILCLDM_SKIP_CROP", "0") == "1"
 _env_roi_volume_shape = os.getenv("ILCLDM_ROI_VOLUME_SHAPE", "").strip()

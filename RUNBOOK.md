@@ -602,13 +602,13 @@ Requisitos: checkpoints E1 (`AAE`) y E2 (`Unet.pth.tar`) del experimento; latent
 
 ## Experimento ROI (`data_rois`)
 
-Patches ya recortados (bbox `mask_basal_ganglia` + 15 vox). **No** se aplica el crop IL-CLDM `[10:170,…]` en carga (`ILCLDM_SKIP_CROP=1`). Shape en disco: `(105, 102, 102)`; el pipeline añade padding cero a `(108, 104, 104)` para que AAE/UNet preserven tamaño; grid latente `(27, 26, 26)`.
+Patches ya recortados (bbox ROI + margen). **No** se aplica el crop IL-CLDM `[10:170,…]` en carga (`ILCLDM_SKIP_CROP=1`). Shape en disco tras reproc: `(96, 112, 114)`; padding AAE/UNet a `(96, 112, 116)`; grid latente `(24, 28, 29)`. (Histórico pre-reproc: `(105, 102, 102)` → pad `(108, 104, 104)`.)
 
 ### Preflight ROI
 
 ```bash
 python3 scripts/preflight_data_rois.py
-python3 scripts/aggregate_roi_unet_mask.py   # una vez: data_rois/roi_mask_unet.nii.gz
+python3 scripts/aggregate_roi_unet_mask.py   # máscara debe coincidir con 96,112,114
 python3 scripts/smoke_test_rois.py
 ```
 
@@ -626,7 +626,7 @@ source scripts/roi_profile_env.sh
 | `ILCLDM_LATENT_ABETA` | `data_rois/latent_Abeta/` |
 | `ILCLDM_LATENT_STATS_PATH` | `data_info/latent_stats_latent_Abeta_rois.json` |
 | `ILCLDM_ROI_MASK_PATH` | `data_rois/roi_mask_unet.nii.gz` |
-| `ILCLDM_ROI_VOLUME_SHAPE` | `105,102,102` |
+| `ILCLDM_ROI_VOLUME_SHAPE` | `96,112,114` |
 
 ### E1 ROI (desde cero, no reutilizar full-brain)
 
@@ -748,7 +748,95 @@ python code/visualize_pair_example.py
 # plot_subject(Path("data"), "3102")
 ```
 
-Usar escala simétrica para MRI; no filtrar solo `voxels > 0`.
+Usar escala simétrica para MRI; no filtrar solo `voxels > 0` (salvo modo `v2load` abajo).
+
+---
+
+## Reproc: datos nuevos + pares `_reproc` / `_reproc_v2load`
+
+Réplicas del baseline calibrado `calib_roi3ch_uni` (full) y `calib_roi3ch_uni_rois` (ROI) sobre NIfTI reprocesados en `data/` y `data_rois/`. **No** sobrescriben los resultados legacy. Split original: `data_info/train.txt`, `validation.txt`, `test.txt`.
+
+| Par | Carga (`ILCLDM_IMAGE_VOLUME_NORM`) | Claves E2 |
+|-----|--------------------------------------|-----------|
+| A `_reproc` | `legacy` — z-score MRI+SPECT (todo el volumen) | `calib_roi3ch_uni_reproc`, `calib_roi3ch_uni_rois_reproc` |
+| B `_reproc_v2load` | `v2load` — MRI: μ/σ en vóxeles `>0`; SPECT: sin z-score | `calib_roi3ch_uni_reproc_v2load`, `calib_roi3ch_uni_rois_reproc_v2load` |
+
+Cada par necesita **su propia** cadena E1 → latents → stats → E2 (no reutilizar AAE/latents entre `reproc` y `reproc_v2load`, ni con el baseline viejo).
+
+### Cadena full — par A (`legacy`)
+
+```bash
+cd /workspace/IL-CLDM
+export ILCLDM_IMAGE_VOLUME_NORM=legacy
+export ILCLDM_LATENT_ABETA=data/latent_Abeta_reproc/
+export ILCLDM_LATENT_STATS_PATH=data_info/latent_stats_latent_Abeta_reproc.json
+
+scripts/run_experiment.sh s1_spect exp_nm_s1_spect_reproc
+# → result/exp_nm_s1_spect_reproc/AAE.pth.tar + data/latent_Abeta_reproc/
+
+scripts/run_experiment.sh s1_mri exp_nm_s1_mri_reproc
+# → result/exp_nm_s1_mri_reproc/phase1_mri/checkpoints/MRI_AAE.pth.tar
+
+python3 -c "from dataset import get_latent_stats; print(get_latent_stats())"
+
+python3 scripts/run_ablation.py calib_roi3ch_uni_reproc --gpu <N>
+
+python3 inference.py \
+  --exp exp_nm_s2_frozen_calib_roi3ch_uni_reproc \
+  --run-id calib_roi3ch_uni_reproc \
+  --mri-encoder-mode frozen \
+  --mri-encoder-checkpoint result/exp_nm_s1_mri_reproc/phase1_mri/checkpoints/MRI_AAE.pth.tar \
+  --save-synthetic-spect --splits train test
+# → classification/classification_metrics.csv bajo result/.../inference/<run_id>/
+```
+
+### Cadena full — par B (`v2load`)
+
+Igual que arriba cambiando sufijos y el flag de carga:
+
+```bash
+export ILCLDM_IMAGE_VOLUME_NORM=v2load
+export ILCLDM_LATENT_ABETA=data/latent_Abeta_reproc_v2load/
+export ILCLDM_LATENT_STATS_PATH=data_info/latent_stats_latent_Abeta_reproc_v2load.json
+
+scripts/run_experiment.sh s1_spect exp_nm_s1_spect_reproc_v2load
+scripts/run_experiment.sh s1_mri exp_nm_s1_mri_reproc_v2load
+python3 -c "from dataset import get_latent_stats; print(get_latent_stats())"
+python3 scripts/run_ablation.py calib_roi3ch_uni_reproc_v2load --gpu <N>
+python3 inference.py \
+  --exp exp_nm_s2_frozen_calib_roi3ch_uni_reproc_v2load \
+  --run-id calib_roi3ch_uni_reproc_v2load \
+  --mri-encoder-mode frozen \
+  --mri-encoder-checkpoint result/exp_nm_s1_mri_reproc_v2load/phase1_mri/checkpoints/MRI_AAE.pth.tar \
+  --save-synthetic-spect --splits train test
+```
+
+### Cadena ROI — par A / B
+
+```bash
+source scripts/roi_profile_env.sh
+# Par A:
+export ILCLDM_IMAGE_VOLUME_NORM=legacy
+export ILCLDM_LATENT_ABETA=data_rois/latent_Abeta_reproc/
+export ILCLDM_LATENT_STATS_PATH=data_info/latent_stats_latent_Abeta_rois_reproc.json
+export ILCLDM_ROI_VOLUME_SHAPE=96,112,114
+export ILCLDM_EXP=exp_nm_s1_spect_rois_reproc/
+python3 main.py   # E1 SPECT encode
+python3 code/run_phase1_mri_experiment.py --exp exp_nm_s1_mri_rois_reproc
+python3 -c "from dataset import get_latent_stats; print(get_latent_stats())"
+python3 scripts/run_ablation.py calib_roi3ch_uni_rois_reproc --gpu <N>
+python3 inference.py \
+  --exp exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc \
+  --run-id calib_roi3ch_uni_rois_reproc \
+  --mri-encoder-mode frozen \
+  --mri-encoder-checkpoint result/exp_nm_s1_mri_rois_reproc/phase1_mri/checkpoints/MRI_AAE.pth.tar \
+  --save-synthetic-spect --splits train test
+
+# Par B: mismos comandos con sufijo _reproc_v2load, IMAGE_VOLUME_NORM=v2load,
+# latent_Abeta_reproc_v2load, y clave registry calib_roi3ch_uni_rois_reproc_v2load.
+```
+
+`inference.py` restaura `IMAGE_VOLUME_NORM`, paths y split desde `run_manifest.json` (escrito en E2). Comparar: baseline legacy vs `_reproc` (efecto datos) y `_reproc` vs `_reproc_v2load` (efecto carga).
 
 ---
 
