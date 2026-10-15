@@ -16,8 +16,10 @@ def test_calib_roi3ch_uni_reproc_legacy_load():
     assert env["ILCLDM_LATENT_ABETA"] == "data/latent_Abeta_reproc/"
     assert env["ILCLDM_LATENT_STATS_PATH"] == "data_info/latent_stats_latent_Abeta_reproc.json"
     assert env["ILCLDM_AAE_CHECKPOINT"] == "result/exp_nm_s1_spect_reproc/AAE.pth.tar"
+    assert env["ILCLDM_WHOLE_MRI"] == "data/whole_MRI"
+    assert env["ILCLDM_WHOLE_ABETA"] == "data/whole_Abeta_4mm"
     assert env["ILCLDM_MRI_ENCODER_CHECKPOINT"].endswith(
-        "exp_nm_s1_mri_reproc/phase1_mri/checkpoints/MRI_AAE.pth.tar"
+        "exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar"
     )
     assert env["ILCLDM_EXP"] == "exp_nm_s2_frozen_calib_roi3ch_uni_reproc/"
 

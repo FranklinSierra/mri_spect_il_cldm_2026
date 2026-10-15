@@ -12,9 +12,77 @@ numworker = 0
 epochs = int(os.getenv("ILCLDM_EPOCHS", "1000"))
 validation_interval = int(os.getenv("ILCLDM_VALIDATION_INTERVAL", "5"))
 early_stopping_patience = int(os.getenv("ILCLDM_EARLY_STOPPING_PATIENCE", "10"))
+# Minimum absolute improvement required to reset early-stopping patience.
+EARLY_STOP_MIN_DELTA = float(os.getenv("ILCLDM_EARLY_STOP_MIN_DELTA", "0.0"))
 time_dim = 128
 num_classes = 2
 Lambda = 100
+
+# Clamp pred_x0 in calibrated diffusion space (train predict_x0 + DDIM sample).
+# Symmetric fallback; the calibrated SPECT latent is strongly left-skewed
+# (train: min -13.0, p0.1 -7.6, max +4.1), so +-4 clipped 8.1% of the signal mass.
+# +-10 clips 0.12%. Set _LO/_HI for an asymmetric window fitted to train stats.
+PRED_X0_CLAMP = float(os.getenv("ILCLDM_PRED_X0_CLAMP", "10.0"))
+_env_x0_lo = os.getenv("ILCLDM_PRED_X0_CLAMP_LO", "").strip()
+_env_x0_hi = os.getenv("ILCLDM_PRED_X0_CLAMP_HI", "").strip()
+PRED_X0_CLAMP_LO = float(_env_x0_lo) if _env_x0_lo else (-PRED_X0_CLAMP if PRED_X0_CLAMP > 0 else None)
+PRED_X0_CLAMP_HI = float(_env_x0_hi) if _env_x0_hi else (PRED_X0_CLAMP if PRED_X0_CLAMP > 0 else None)
+
+# Highest timestep the DDIM sampler starts from. The cosine schedule drives
+# alpha_hat to 2.4e-10 at t=T-1 (amplification 1/sqrt(a_hat) = 64171x), which
+# saturated 99.99% of pred_x0 on the first step. At t=990 the factor is 71x.
+#
+# NOTE: a wide (correct) clamp exposes epsilon shrinkage instead of masking it.
+# The film_ms checkpoint under-predicts eps by ~29% (<eps_pred,eps>/<eps,eps> =
+# 0.71 at every t), so pred_x0 error grows as 0.29/sqrt(alpha_hat). Measured
+# latent MSE on test (var of the target = 3.90, i.e. MSE 3.90 = predicting the
+# mean); every row is worse than the mean, which is a model problem, not a
+# sampler one:
+#     t_max=990 clamp[-10,+4.5] -> 84.0     t_max=990 clamp+-4 -> 17.4
+#     t_max=900 clamp[-10,+4.5] -> 37.0     t_max=800 clamp+-4 -> 14.5
+#     t_max=800 clamp[-10,+4.5] -> 16.1
+#     t_max=700 clamp[-10,+4.5] ->  9.7
+# Lowering t_max compensates for the shrinkage; it does not fix it. A healthy
+# model should reach MSE < 3.90 at t_max=990. Do NOT tighten the clamp to make
+# the numbers look better -- that is what hid the divergence for months.
+SAMPLING_T_MAX = int(os.getenv("ILCLDM_SAMPLING_T_MAX", "990"))
+
+# Label dropout: if >0, Embedding has num_classes+1 rows (null token = num_classes).
+LABEL_DROPOUT_PROB = float(os.getenv("ILCLDM_LABEL_DROPOUT_PROB", "0.0"))
+
+# EMA regime (warmup 0.9 → 0.995 is mandatory when using defaults).
+EMA_BETA = float(os.getenv("ILCLDM_EMA_BETA", "0.995"))
+EMA_BETA_START = float(os.getenv("ILCLDM_EMA_BETA_START", "0.9"))
+# 0 → auto: max(200, 5% of estimated train steps) after step_start.
+EMA_WARMUP_STEPS = int(os.getenv("ILCLDM_EMA_WARMUP_STEPS", "0"))
+# 0 → auto: max(1, 5% of estimated train steps).
+EMA_STEP_START = int(os.getenv("ILCLDM_EMA_STEP_START", "0"))
+
+# UNet self-attention resolutions (comma-separated). Default (4,) is legacy/broken
+# for 40³ and 24³ grids; full-brain should use 5 only.
+_env_attn_res = os.getenv("ILCLDM_ATTN_RES", "4").strip()
+ATTN_RES = tuple(int(x.strip()) for x in _env_attn_res.split(",") if x.strip()) or (4,)
+
+# FiLM / AdaGN-style MRI conditioning in every ResnetBlock (off = concat-only legacy).
+USE_FILM = os.getenv("ILCLDM_USE_FILM", "0") == "1"
+
+# FiLM mode: off | global (GAP+h64→MLP bias) | spatial_ms (h64 map, gamma/beta per block).
+_env_film_mode = os.getenv("ILCLDM_FILM_MODE", "off").strip().lower()
+if _env_film_mode not in ("off", "global", "spatial_ms"):
+    raise ValueError(
+        f"ILCLDM_FILM_MODE must be off|global|spatial_ms, got {_env_film_mode!r}"
+    )
+FILM_MODE = _env_film_mode
+if FILM_MODE == "off" and USE_FILM:
+    FILM_MODE = "global"
+FILM_COND_CHANNELS = int(os.getenv("ILCLDM_FILM_COND_CHANNELS", "64"))
+
+USE_WANDB = os.getenv("ILCLDM_USE_WANDB", "0") == "1"
+WANDB_PROJECT = os.getenv("ILCLDM_WANDB_PROJECT", "IL-CLDM").strip() or "IL-CLDM"
+WANDB_RUN_NAME = os.getenv("ILCLDM_WANDB_RUN_NAME", "").strip()
+
+# Classical classifiers: SVM hangs on high-D latents; off by default.
+INCLUDE_SVM = os.getenv("ILCLDM_INCLUDE_SVM", "0") == "1"
 
 # Stage-1 / image-space SPECT losses (z-score aware)
 USE_WEIGHTED_RECON_LOSS = os.getenv("ILCLDM_USE_WEIGHTED_RECON", "1") == "1"
@@ -33,6 +101,16 @@ AUX_IMAGE_ALWAYS_HIGH_T = os.getenv("ILCLDM_AUX_IMAGE_ALWAYS_HIGH_T", "0") == "1
 # Stage-2 v2: latent-space loss and high-noise timestep sampling
 LATENT_LOSS = os.getenv("ILCLDM_LATENT_LOSS", "0") == "1"
 LATENT_LOSS_LAMBDA = float(os.getenv("ILCLDM_LATENT_LOSS_LAMBDA", "0.5"))
+
+# What the UNet is trained to emit.
+# epsilon: predict noise, main loss is MSE (default; existing runs).
+# x0: predict the clean latent, main loss is L1. Noise MSE is not added.
+_env_diffusion_objective = os.getenv("ILCLDM_DIFFUSION_OBJECTIVE", "epsilon").strip().lower()
+if _env_diffusion_objective not in ("epsilon", "x0"):
+    raise ValueError(
+        f"ILCLDM_DIFFUSION_OBJECTIVE must be epsilon|x0, got {_env_diffusion_objective!r}"
+    )
+DIFFUSION_OBJECTIVE = _env_diffusion_objective
 HIGH_T_SAMPLE_PROB = float(os.getenv("ILCLDM_HIGH_T_SAMPLE_PROB", "0"))
 HIGH_T_THRESHOLD = int(os.getenv("ILCLDM_HIGH_T_THRESHOLD", "700"))
 
@@ -50,11 +128,22 @@ LATENT_STATS_PATH = os.getenv("ILCLDM_LATENT_STATS_PATH", "").strip()
 # Image-volume load normalization for whole_MRI / whole_Abeta (not latents).
 # legacy: per-volume z-score over all voxels (MRI + SPECT).
 # v2load: MRI z-score using voxels > 0 only; SPECT left as-is (region-normalized).
+# minmax: clip to train percentiles 0.5/99.5 (one lo/hi per modality) and scale to [0, 1].
 IMAGE_VOLUME_NORM = os.getenv("ILCLDM_IMAGE_VOLUME_NORM", "legacy").strip().lower() or "legacy"
-if IMAGE_VOLUME_NORM not in ("legacy", "v2load"):
+if IMAGE_VOLUME_NORM not in ("legacy", "v2load", "minmax"):
     raise ValueError(
-        f"ILCLDM_IMAGE_VOLUME_NORM must be legacy|v2load, got {IMAGE_VOLUME_NORM!r}"
+        f"ILCLDM_IMAGE_VOLUME_NORM must be legacy|v2load|minmax, got {IMAGE_VOLUME_NORM!r}"
     )
+MINMAX_STATS_PATH = os.getenv(
+    "ILCLDM_MINMAX_STATS_PATH", "data_info/minmax_rois_p05_p995.json"
+).strip()
+MINMAX_PERCENTILE_LO = float(os.getenv("ILCLDM_MINMAX_PERCENTILE_LO", "0.5"))
+MINMAX_PERCENTILE_HI = float(os.getenv("ILCLDM_MINMAX_PERCENTILE_HI", "99.5"))
+
+# KL on the AAE posterior toward N(0, I). The encoder then emits (mu, logvar)
+# and the decoder ends in tanh. Off for every existing experiment.
+KL_LOSS = os.getenv("ILCLDM_KL_LOSS", "0") == "1"
+KL_LAMBDA = float(os.getenv("ILCLDM_KL_LAMBDA", "1e-3"))
 
 # ROI patch profile (data_rois): skip IL-CLDM crop(); volumes already cropped on disk.
 SKIP_CROP = os.getenv("ILCLDM_SKIP_CROP", "0") == "1"
@@ -67,7 +156,7 @@ if _env_roi_volume_shape:
     ROI_VOLUME_SHAPE = tuple(_parts)
 
 # Stage-2 v2: ROI-weighted aux loss (basal ganglia mask, same crop as volumes)
-ROI_MASK_PATH = os.getenv("ILCLDM_ROI_MASK_PATH", "data/mask_basal_ganglia.nii.gz")
+ROI_MASK_PATH = os.getenv("ILCLDM_ROI_MASK_PATH", "data/mask_basal_ganglia_full.nii.gz")
 ROI_WEIGHT_ALPHA = float(os.getenv("ILCLDM_ROI_WEIGHT_ALPHA", "3.0"))
 USE_ROI_LOSS = os.getenv("ILCLDM_USE_ROI_LOSS", "0") == "1"
 

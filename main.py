@@ -1,5 +1,6 @@
 import copy
 import csv
+import json
 import os
 from pathlib import Path
 
@@ -19,17 +20,26 @@ from code.diffusion_features import (
     batch_latent_to_tensor,
     decode_h64_via_bottleneck,
     encode_mri_condition,
+    encode_mri_dual,
     resolve_diffusion_feature_space,
 )
 from code.roi_mask_utils import try_load_roi_mask_numpy, try_load_roi_mask_tensor
 from code.volume_shapes import get_latent_shape
-from dataset import OneDataset, TwoDataset, get_latent_stats
+from dataset import (
+    OneDataset,
+    TwoDataset,
+    dataset_image_to_model,
+    get_latent_stats,
+    stored_image_from_model,
+    write_latent_mu_report,
+)
 from losses import spect_reconstruction_loss
-from model import AAE, Discriminator, EMA, MRIEncoder, UNet, LatentClsHead, build_unet
+from model import AAE, Discriminator, EMA, MRIEncoder, UNet, LatentClsHead, build_unet, kl_standard_normal
 from utils import (
     load_checkpoint,
     load_cls_head_checkpoint,
     load_unet_init_checkpoint,
+    resolve_aae_resume,
     save_checkpoint,
     save_cls_head_checkpoint,
     seed_torch,
@@ -87,15 +97,7 @@ def batch_metric_scores(target, prediction):
     return psnr_total, ssim_total
 
 
-def batch_metric_scores_roi(target, prediction, roi_mask):
-    target = to_numpy_float(target)
-    prediction = prepare_prediction_for_metrics(prediction)
-    if target.ndim == 4:
-        target = target[0]
-        prediction = prediction[0]
-    mask = roi_mask > 0.5
-    if not mask.any():
-        return 0.0, 0.0
+def _roi_metric_pair(target, prediction, mask):
     coords = np.argwhere(mask)
     mins = coords.min(axis=0)
     maxs = coords.max(axis=0) + 1
@@ -112,10 +114,74 @@ def batch_metric_scores_roi(target, prediction, roi_mask):
     )
 
 
+def batch_metric_scores_roi(target, prediction, roi_mask):
+    """Sum of per-subject ROI scores. The caller divides by the subject count."""
+    target = to_numpy_float(target)
+    prediction = prepare_prediction_for_metrics(prediction)
+    if target.ndim == 3:
+        target = target[None, ...]
+        prediction = prediction[None, ...]
+    if target.ndim != 4:
+        raise ValueError(f"Expected 3D volume or batched 3D volumes, got shape {target.shape}")
+    mask = roi_mask > 0.5
+    if not mask.any():
+        return 0.0, 0.0
+    psnr_total = 0.0
+    ssim_total = 0.0
+    for target_i, prediction_i in zip(target, prediction):
+        psnr_i, ssim_i = _roi_metric_pair(target_i, prediction_i, mask)
+        psnr_total += psnr_i
+        ssim_total += ssim_i
+    return psnr_total, ssim_total
+
+
+def latent_mean_baseline():
+    """MSE of copying the train mean latent, in the calibrated diffusion space.
+
+    Absent when the stats JSON has no ``mean_image_mse_calibrated`` field, so
+    runs that do not use the minmax+KL stats keep their previous CSV schema.
+    """
+    stats_path = Path(getattr(config, "LATENT_STATS_PATH", "") or "")
+    if not stats_path.is_file():
+        return None
+    try:
+        payload = json.loads(stats_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = payload.get("mean_image_mse_calibrated")
+    if value is None:
+        return None
+    return float(value)
+
+
 def batch_latent_metric_scores(z_gen, z_gt):
-    mse = F.mse_loss(z_gen, z_gt).item()
-    mae = F.l1_loss(z_gen, z_gt).item()
+    """Per-subject sums, so the caller's `/ length` yields the true mean.
+
+    F.mse_loss already averages over the batch; returning that average and then
+    dividing by the subject count again under-reported latent MSE/MAE by
+    n_batches / n_subjects (e.g. 5/34 = 0.147x on a 34-subject split).
+    """
+    n = z_gen.shape[0]
+    mse = F.mse_loss(z_gen, z_gt).item() * n
+    mae = F.l1_loss(z_gen, z_gt).item() * n
     return mse, mae
+
+
+def mri_film_for_unet(film_tensor):
+    return film_tensor if config.FILM_MODE == "spatial_ms" else None
+
+
+def use_constant_latent_l1(use_latent_loss, objective="epsilon", global_step=0, every_n=10):
+    """Add L1(x0_hat, x0) on every step while the network still predicts noise.
+
+    ``global_step`` and ``every_n`` are accepted and ignored. This term is not
+    gated by ``AUX_IMAGE_EVERY_N``. When the objective is already ``x0``, the
+    main loss is that L1 and this extra term stays off.
+    """
+    del global_step, every_n
+    if objective == "x0":
+        return False
+    return bool(use_latent_loss)
 
 
 def reconstruction_training_loss(target, prediction):
@@ -197,9 +263,44 @@ class Diffusion:
                 t[i] = torch.randint(1, high_threshold, (1,)).item()
         return t
 
+    @staticmethod
+    def _clamp_x0(pred):
+        lo = getattr(config, "PRED_X0_CLAMP_LO", None)
+        hi = getattr(config, "PRED_X0_CLAMP_HI", None)
+        if lo is None and hi is None:
+            clamp = float(getattr(config, "PRED_X0_CLAMP", 0.0) or 0.0)
+            return pred.clamp(-clamp, clamp) if clamp > 0 else pred
+        return pred.clamp(lo, hi)
+
+    @staticmethod
+    def predicts_x0():
+        return getattr(config, "DIFFUSION_OBJECTIVE", "epsilon") == "x0"
+
     def predict_x0(self, x_t, t, predicted_noise):
         alpha_hat = self.alpha_hat[t][:, None, None, None, None]
-        return (x_t - torch.sqrt(1 - alpha_hat) * predicted_noise) / torch.sqrt(alpha_hat)
+        pred = (x_t - torch.sqrt(1 - alpha_hat) * predicted_noise) / torch.sqrt(alpha_hat)
+        return self._clamp_x0(pred)
+
+    def epsilon_from_x0(self, x_t, t, pred_x0):
+        """Noise implied by a clean-latent prediction. Sampler-only; not a loss target."""
+        alpha_hat = self.alpha_hat[t][:, None, None, None, None]
+        return (x_t - torch.sqrt(alpha_hat) * pred_x0) / torch.sqrt((1.0 - alpha_hat).clamp(min=1e-8))
+
+    def ddim_pred(self, x_t, t, model_output):
+        """Return ``(pred_x0, eps)`` for one DDIM step.
+
+        ``epsilon``: the network emits noise; ``x0`` is the clamped algebraic inverse.
+        ``x0``: the network emits the clean latent; noise is recovered only so the
+        direction term of the DDIM update stays valid.
+        """
+        if self.predicts_x0():
+            pred_x0 = self._clamp_x0(model_output)
+            return pred_x0, self.epsilon_from_x0(x_t, t, pred_x0)
+        return self.predict_x0(x_t, t, model_output), model_output
+
+    def x0_from_model_output(self, x_t, t, model_output):
+        pred_x0, _eps = self.ddim_pred(x_t, t, model_output)
+        return pred_x0
 
     def sample(self, model, y, sampling_steps=None, eta=None):
         if sampling_steps is None:
@@ -213,8 +314,12 @@ class Diffusion:
             channels = int(getattr(config, "DIFFUSION_CHANNELS", 1))
             x = torch.randn((n, channels, *latent_shape)).to(config.device)
             step_count = min(sampling_steps, self.noise_steps - 1)
+            t_max = int(getattr(config, "SAMPLING_T_MAX", 0) or 0)
+            if t_max <= 0:
+                t_max = self.noise_steps - 1
+            t_max = min(t_max, self.noise_steps - 1)
             timesteps = torch.linspace(
-                self.noise_steps - 1,
+                t_max,
                 1,
                 step_count,
                 dtype=torch.long,
@@ -224,7 +329,8 @@ class Diffusion:
 
             for idx, timestep in enumerate(tqdm(timesteps, position=0)):
                 t = torch.full((n,), timestep.item(), dtype=torch.long, device=config.device)
-                predicted_noise = model(x, y, t)
+                model_output = model(x, y, t)
+                pred_x0, predicted_noise = self.ddim_pred(x, t, model_output)
 
                 alpha_hat = self.alpha_hat[t][:, None, None, None, None]
                 if idx == len(timesteps) - 1:
@@ -234,7 +340,6 @@ class Diffusion:
                     prev_t = torch.full((n,), prev_timestep.item(), dtype=torch.long, device=config.device)
                     alpha_hat_prev = self.alpha_hat[prev_t][:, None, None, None, None]
 
-                pred_x0 = (x - torch.sqrt(1 - alpha_hat) * predicted_noise) / torch.sqrt(alpha_hat)
                 sigma = eta * torch.sqrt(
                     (1 - alpha_hat_prev) / (1 - alpha_hat) * (1 - alpha_hat / alpha_hat_prev)
                 )
@@ -272,7 +377,6 @@ def evaluate_ldm_split(
     ssim_total = 0.0
     psnr_roi_total = 0.0
     ssim_roi_total = 0.0
-    roi_count = 0
     latent_mse_total = 0.0
     latent_mae_total = 0.0
 
@@ -286,9 +390,12 @@ def evaluate_ldm_split(
 
         with torch.no_grad():
             if mri_encoder is not None:
-                MRI_cond = encode_mri_condition(mri_encoder, MRI, feat_space)
+                MRI_cond, MRI_film = encode_mri_dual(mri_encoder, MRI, feat_space)
+                film = mri_film_for_unet(MRI_film)
                 sampled_latent = diffusion.sample(
-                    lambda x, y, t: ema_Unet(x, y, t, precomputed_condition=True),
+                    lambda x, y, t: ema_Unet(
+                        x, y, t, mri_film=film, precomputed_condition=True
+                    ),
                     MRI_cond,
                 )
             else:
@@ -313,25 +420,28 @@ def evaluate_ldm_split(
         if syn_Abeta is None:
             continue
 
-        batch_psnr, batch_ssim = batch_metric_scores(Abeta, syn_Abeta)
+        syn_for_metrics = stored_image_from_model(syn_Abeta)
+        batch_psnr, batch_ssim = batch_metric_scores(Abeta, syn_for_metrics)
         psnr_total += batch_psnr
         ssim_total += batch_ssim
 
         if roi_mask_np is not None:
-            psnr_roi, ssim_roi = batch_metric_scores_roi(Abeta, syn_Abeta, roi_mask_np)
+            psnr_roi, ssim_roi = batch_metric_scores_roi(Abeta, syn_for_metrics, roi_mask_np)
             psnr_roi_total += psnr_roi
             ssim_roi_total += ssim_roi
-            roi_count += 1
 
+    latent_std = float(getattr(diffusion, "latent_std", 1.0) or 1.0)
+    if latent_std < 1e-8:
+        latent_std = 1.0
     metrics = {
         "psnr": psnr_total / length,
         "ssim": ssim_total / length,
-        "latent_mse": latent_mse_total / length if track_latent else None,
-        "latent_mae": latent_mae_total / length if track_latent else None,
+        "latent_mse": (latent_mse_total / length) / (latent_std ** 2) if track_latent else None,
+        "latent_mae": (latent_mae_total / length) / latent_std if track_latent else None,
     }
-    if roi_mask_np is not None and roi_count > 0:
-        metrics["psnr_roi"] = psnr_roi_total / roi_count
-        metrics["ssim_roi"] = ssim_roi_total / roi_count
+    if roi_mask_np is not None and length > 0:
+        metrics["psnr_roi"] = psnr_roi_total / length
+        metrics["ssim_roi"] = ssim_roi_total / length
     return metrics
 
 
@@ -347,16 +457,24 @@ def train_autoencoder(root_input, checkpoint_path, run_name):
     disc = Discriminator().to(config.device)
     opt_disc = optim.Adam(disc.parameters(),lr=config.learning_rate,betas=(0.5, 0.999))
 
-    average = 0
+    result_dir = build_result_dir()
+    start_epoch, average, should_load = resolve_aae_resume(
+        checkpoint_path, result_dir, run_name
+    )
+    if should_load:
+        load_checkpoint(checkpoint_path, model, opt_model, config.learning_rate)
     validations_without_improvement = 0
 
-    for epoch in range(config.epochs):
+    for epoch in range(start_epoch, config.epochs):
         print("epoch:", epoch)
         result_dir = build_result_dir()
         lossfile = open(result_dir / f"{run_name}_loss_curve.csv", 'a+',newline = '')
         writer = csv.writer(lossfile)
         if epoch == 0:
-            writer.writerow(["Epoch","recon_loss","disc_loss_epoch"])
+            header = ["Epoch", "recon_loss", "disc_loss_epoch"]
+            if config.KL_LOSS:
+                header.append("kl_loss")
+            writer.writerow(header)
         
         dataset = OneDataset(root_Abeta=root_input, task=config.train, stage="train")
         loader = DataLoader(dataset,batch_size=config.batch_size,shuffle=True,num_workers=config.numworker,pin_memory=True,drop_last=True)
@@ -364,26 +482,40 @@ def train_autoencoder(root_input, checkpoint_path, run_name):
         length = dataset.length_dataset
         recon_loss_epoch=0
         disc_loss_epoch=0
+        kl_loss_epoch=0
 
         for idx, (Abeta, name) in enumerate(loop):
             Abeta = np.expand_dims(Abeta, axis=1)
             Abeta = torch.tensor(Abeta)
             Abeta = Abeta.to(config.device)
-            decoded_Abeta = model(Abeta)
-            
-            disc_real = disc(Abeta)
-            disc_fake = disc(decoded_Abeta)
-
-            recon_loss = reconstruction_training_loss(Abeta, decoded_Abeta)
-            g_loss = -torch.mean(disc_fake)
-            loss = recon_loss*config.Lambda + g_loss
+            if config.KL_LOSS:
+                z, mu, logvar = model.encoder(Abeta, sample=True)
+                decoded_Abeta = model.decoder(z)
+                kl_loss = kl_standard_normal(mu, logvar)
+                real = dataset_image_to_model(Abeta)
+                recon_loss = reconstruction_training_loss(real, decoded_Abeta)
+                disc_fake = disc(decoded_Abeta)
+                g_loss = -torch.mean(disc_fake)
+                loss = recon_loss + config.KL_LAMBDA * kl_loss + g_loss
+                opt_model.zero_grad()
+                loss.backward()
+                disc_real = disc(real)
+                disc_fake_det = disc(decoded_Abeta.detach())
+            else:
+                decoded_Abeta = model(Abeta)
+                kl_loss = None
+                disc_real = disc(Abeta)
+                disc_fake = disc(decoded_Abeta)
+                recon_loss = reconstruction_training_loss(Abeta, decoded_Abeta)
+                g_loss = -torch.mean(disc_fake)
+                loss = recon_loss*config.Lambda + g_loss
+                opt_model.zero_grad()
+                loss.backward(retain_graph=True)
+                disc_fake_det = disc_fake
 
             d_loss_real = torch.mean(F.relu(1. - disc_real))
-            d_loss_fake = torch.mean(F.relu(1. + disc_fake))
+            d_loss_fake = torch.mean(F.relu(1. + disc_fake_det))
             disc_loss = (d_loss_real + d_loss_fake)/2
-
-            opt_model.zero_grad()
-            loss.backward(retain_graph=True)
 
             opt_disc.zero_grad()
             disc_loss.backward()
@@ -393,8 +525,13 @@ def train_autoencoder(root_input, checkpoint_path, run_name):
 
             recon_loss_epoch = recon_loss_epoch + recon_loss
             disc_loss_epoch = disc_loss_epoch + disc_loss
-        
-        writer.writerow([epoch+1, recon_loss_epoch.item()/length, disc_loss_epoch.item()/length])
+            if kl_loss is not None:
+                kl_loss_epoch = kl_loss_epoch + kl_loss.detach()
+
+        row = [epoch+1, recon_loss_epoch.item()/length, disc_loss_epoch.item()/length]
+        if config.KL_LOSS:
+            row.append(kl_loss_epoch.item()/length)
+        writer.writerow(row)
         lossfile.close()
 
         if not should_validate(epoch):
@@ -418,7 +555,7 @@ def train_autoencoder(root_input, checkpoint_path, run_name):
             Abeta = torch.tensor(Abeta)
             Abeta = Abeta.to(config.device)
             
-            decoded_Abeta = model(Abeta)
+            decoded_Abeta = stored_image_from_model(model(Abeta))
             batch_psnr, batch_ssim = batch_metric_scores(Abeta, decoded_Abeta)
             psnr_0 += batch_psnr
             ssim_0 += batch_ssim
@@ -428,7 +565,8 @@ def train_autoencoder(root_input, checkpoint_path, run_name):
         csvfile.close()
         
         # test part
-        if average_epoch > average:
+        delta = float(getattr(config, "EARLY_STOP_MIN_DELTA", 0.0) or 0.0)
+        if average_epoch > average + delta:
             average = average_epoch
             validations_without_improvement = 0
             save_checkpoint(model, opt_model, filename=checkpoint_path)
@@ -450,7 +588,7 @@ def train_autoencoder(root_input, checkpoint_path, run_name):
                 Abeta = torch.tensor(Abeta)
                 Abeta = Abeta.to(config.device)
                 
-                decoded_Abeta = model(Abeta)
+                decoded_Abeta = stored_image_from_model(model(Abeta))
                 batch_psnr, batch_ssim = batch_metric_scores(Abeta, decoded_Abeta)
                 psnr_0 += batch_psnr
                 ssim_0 += batch_ssim
@@ -508,6 +646,14 @@ def encode_dataset(encoder_root, checkpoint_path, output_root, task_file):
         latent_Abeta = nib.Nifti1Image(latent_Abeta, image.affine)
         nib.save(latent_Abeta, os.path.join(output_root, str(name[0])))
 
+    report = write_latent_mu_report(output_root)
+    if report:
+        print(
+            "latent mu report: "
+            f"mean={report['mean']:.4f} std={report['std']:.4f} "
+            f"frac_|z|>4={report['frac_abs_gt_4']:.4f}"
+        )
+
 
 def encoding():
     encode_dataset(config.whole_Abeta, config.CHECKPOINT_AAE, config.latent_Abeta, config.train)
@@ -558,13 +704,20 @@ def evaluate_cls_balanced_accuracy(diffusion, ema_unet, aae_model, mri_encoder, 
                 t = diffusion.sample_timesteps(latent_Abeta.shape[0]).to(config.device)
             x_t, noise = diffusion.noise_images(latent_Abeta, t)
             if mri_encoder is not None:
-                MRI_cond = encode_mri_condition(
+                MRI_cond, MRI_film = encode_mri_dual(
                     mri_encoder, MRI, resolve_diffusion_feature_space()
                 )
-                predicted_noise = ema_unet(x_t, MRI_cond, t, None, precomputed_condition=True)
+                predicted_noise = ema_unet(
+                    x_t,
+                    MRI_cond,
+                    t,
+                    None,
+                    mri_film=mri_film_for_unet(MRI_film),
+                    precomputed_condition=True,
+                )
             else:
                 predicted_noise = ema_unet(x_t, MRI, t, None)
-            x0_hat = diffusion.predict_x0(x_t, t, predicted_noise)
+            x0_hat = diffusion.x0_from_model_output(x_t, t, predicted_noise)
             logits = cls_head(x0_hat)
             pred = (torch.sigmoid(logits) >= 0.5).long()
             y_true.extend(label.detach().cpu().numpy().tolist())
@@ -638,8 +791,63 @@ def train_LDM():
     use_data_parallel = config.device == "cuda" and torch.cuda.is_available() and len(gpus) > 1
     if use_data_parallel:
         Unet = nn.DataParallel(Unet,device_ids=gpus,output_device=gpus[0])
-    ema = EMA(0.9999)
+
+    # Estimate train steps for EMA schedule (auto step_start / warmup).
+    with open(config.train, encoding="utf-8") as _tf:
+        n_train = sum(1 for line in _tf if line.strip())
+    steps_per_epoch = max(1, (n_train + config.batch_size - 1) // config.batch_size)
+    estimated_total_steps = steps_per_epoch * int(config.epochs)
+    ema_step_start = int(config.EMA_STEP_START)
+    if ema_step_start <= 0:
+        ema_step_start = max(1, int(0.05 * estimated_total_steps))
+    ema_warmup = int(config.EMA_WARMUP_STEPS)
+    if ema_warmup <= 0:
+        ema_warmup = max(200, int(0.05 * estimated_total_steps))
+    ema = EMA(
+        beta=config.EMA_BETA,
+        beta_start=config.EMA_BETA_START,
+        warmup_steps=ema_warmup,
+        step_start_ema=ema_step_start,
+    )
     ema_Unet = copy.deepcopy(Unet).eval().requires_grad_(False)
+    print(
+        f"EMA: beta {config.EMA_BETA_START}→{config.EMA_BETA}, "
+        f"step_start={ema_step_start}, warmup_steps={ema_warmup} "
+        f"(est. total steps={estimated_total_steps})"
+    )
+    core_unet = Unet.module if isinstance(Unet, nn.DataParallel) else Unet
+    if hasattr(core_unet, "count_attn_blocks"):
+        spatial_film_n = (
+            core_unet.count_spatial_film_blocks()
+            if hasattr(core_unet, "count_spatial_film_blocks")
+            else 0
+        )
+        print(
+            f"UNet attn_res={getattr(core_unet, 'attn_res', None)} "
+            f"attn_blocks={core_unet.count_attn_blocks()} "
+            f"film_mode={getattr(core_unet, 'film_mode', 'off')} "
+            f"global_film={getattr(core_unet, 'use_film', False)} "
+            f"spatial_film_blocks={spatial_film_n}"
+        )
+
+    wandb_run = None
+    if getattr(config, "USE_WANDB", False):
+        try:
+            import wandb
+
+            wandb_run = wandb.init(
+                project=config.WANDB_PROJECT,
+                name=config.WANDB_RUN_NAME or config.REGISTRY_KEY or str(config.exp).rstrip("/"),
+                config={k: getattr(config, k) for k in (
+                    "PRED_X0_CLAMP", "LABEL_DROPOUT_PROB", "EMA_BETA", "EMA_BETA_START",
+                    "DIFFUSION_OBJECTIVE", "LATENT_LOSS", "LATENT_LOSS_LAMBDA",
+                    "ATTN_RES", "USE_FILM", "FILM_MODE", "FILM_COND_CHANNELS",
+                    "batch_size", "learning_rate", "noiseSteps",
+                )},
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"wandb init failed ({exc}); continuing without wandb")
+            wandb_run = None
 
     L2 = nn.MSELoss()
     diffusion = Diffusion()
@@ -650,6 +858,7 @@ def train_LDM():
 
     use_aux_image = config.AUX_IMAGE_LOSS
     use_latent_loss = config.LATENT_LOSS
+    predicts_x0 = diffusion.predicts_x0()
     global_step = 0
     roi_mask_tensor = try_load_roi_mask_tensor(config.device)
     roi_mask_np = try_load_roi_mask_numpy()
@@ -662,10 +871,10 @@ def train_LDM():
         lossfile = open(result_dir / "loss_curve.csv", 'a+', newline='')
         writer = csv.writer(lossfile)
         if lossfile.tell() == 0:
-            header = ["Epoch", "MSE_loss"]
+            header = ["Epoch", "x0_l1" if predicts_x0 else "MSE_loss"]
             if use_aux_image:
                 header.append("aux_image_loss")
-            if use_latent_loss:
+            if use_constant_latent_l1(use_latent_loss, objective=config.DIFFUSION_OBJECTIVE):
                 header.append("latent_loss")
             if use_cls_loss:
                 header.append("cls_loss")
@@ -684,6 +893,7 @@ def train_LDM():
         length = dataset.length_dataset
 
         MSE_loss_epoch = 0
+        seen_subjects = 0
         aux_loss_epoch = 0
         aux_steps = 0
         latent_loss_epoch = 0
@@ -714,14 +924,27 @@ def train_LDM():
             feat_space = resolve_diffusion_feature_space()
             if mri_encoder is not None:
                 if mri_encoder_trainable:
-                    MRI_cond = encode_mri_condition(mri_encoder, MRI, feat_space)
+                    MRI_cond, MRI_film = encode_mri_dual(mri_encoder, MRI, feat_space)
                 else:
                     with torch.no_grad():
-                        MRI_cond = encode_mri_condition(mri_encoder, MRI, feat_space)
-                predicted_noise = Unet(x_t, MRI_cond, t, train_label, precomputed_condition=True)
+                        MRI_cond, MRI_film = encode_mri_dual(mri_encoder, MRI, feat_space)
+                predicted_noise = Unet(
+                    x_t,
+                    MRI_cond,
+                    t,
+                    train_label,
+                    mri_film=mri_film_for_unet(MRI_film),
+                    precomputed_condition=True,
+                )
             else:
                 predicted_noise = Unet(x_t, MRI, t, train_label)
-            loss = L2(predicted_noise, noise)
+            if predicts_x0:
+                x0_hat = diffusion.x0_from_model_output(x_t, t, predicted_noise)
+                primary = F.l1_loss(x0_hat, latent_Abeta)
+            else:
+                x0_hat = None
+                primary = L2(predicted_noise, noise)
+            loss = primary
 
             high_t_batch = (t > config.HIGH_T_THRESHOLD).all().item()
             # Aux image decode only for bottleneck spaces (or h64 with bonus flag).
@@ -730,10 +953,16 @@ def train_LDM():
                 high_t_batch
                 or (global_step % config.AUX_IMAGE_EVERY_N == 0)
             )
-            need_x0_hat = use_latent_loss or apply_aux or use_cls_loss
-            x0_hat = diffusion.predict_x0(x_t, t, predicted_noise) if need_x0_hat else None
+            add_latent_l1 = use_constant_latent_l1(
+                use_latent_loss,
+                objective=config.DIFFUSION_OBJECTIVE,
+                global_step=global_step,
+                every_n=config.AUX_IMAGE_EVERY_N,
+            )
+            if x0_hat is None and (add_latent_l1 or apply_aux or use_cls_loss):
+                x0_hat = diffusion.x0_from_model_output(x_t, t, predicted_noise)
 
-            if use_latent_loss:
+            if add_latent_l1:
                 latent_loss = F.l1_loss(x0_hat, latent_Abeta)
                 loss = loss + config.LATENT_LOSS_LAMBDA * latent_loss
                 latent_loss_epoch += latent_loss.detach()
@@ -745,9 +974,9 @@ def train_LDM():
                 if spect_pred is None:
                     apply_aux = False
                 else:
-                    spect_gt = torch.tensor(
+                    spect_gt = dataset_image_to_model(torch.tensor(
                         np.expand_dims(spect_volume, axis=1), device=config.device, dtype=torch.float32
-                    )
+                    ))
                     aux_loss, _ = spect_reconstruction_loss(
                         spect_gt,
                         spect_pred,
@@ -777,18 +1006,26 @@ def train_LDM():
             opt_Unet.step()
             ema.step_ema(ema_Unet, Unet)
 
-            MSE_loss_epoch += L2(predicted_noise, noise).detach()
+            MSE_loss_epoch += primary.detach() * latent_Abeta.shape[0]
+            seen_subjects += int(latent_Abeta.shape[0])
             global_step += 1
 
-        row = [epoch + 1, MSE_loss_epoch.item() / length]
+        loss_mean = MSE_loss_epoch / max(seen_subjects, 1)
+        row = [epoch + 1, loss_mean.item() if torch.is_tensor(loss_mean) else float(loss_mean)]
         if use_aux_image:
             row.append((aux_loss_epoch / max(aux_steps, 1)).item())
-        if use_latent_loss:
+        if use_constant_latent_l1(use_latent_loss, objective=config.DIFFUSION_OBJECTIVE):
             row.append((latent_loss_epoch / max(latent_steps, 1)).item())
         if use_cls_loss:
             row.append((cls_loss_epoch / max(cls_steps, 1)).item())
         writer.writerow(row)
         lossfile.close()
+        if wandb_run is not None:
+            train_key = "train/x0_l1" if predicts_x0 else "train/mse_loss"
+            log = {"epoch": epoch + 1, train_key: row[1]}
+            if use_aux_image and len(row) > 2:
+                log["train/aux_image_loss"] = row[2]
+            wandb_run.log(log, step=epoch + 1)
 
         if not should_validate(epoch):
             continue
@@ -804,30 +1041,41 @@ def train_LDM():
             track_latent=True,
         )
 
+        mean_baseline = latent_mean_baseline()
         csvfile = open(result_dir / "validation.csv", 'a+', newline='')
         writer = csv.writer(csvfile)
         if csvfile.tell() == 0:
             header = ['Epoch', 'PSNR', 'SSIM']
             if roi_mask_np is not None:
                 header.extend(['PSNR_roi', 'SSIM_roi'])
+            if mean_baseline is not None:
+                header.extend(['latent_MSE', 'latent_MSE_mean_baseline'])
             writer.writerow(header)
         val_row = [epoch + 1, val_metrics["psnr"], val_metrics["ssim"]]
         if roi_mask_np is not None:
             val_row.extend([val_metrics.get("psnr_roi", 0.0), val_metrics.get("ssim_roi", 0.0)])
+        if mean_baseline is not None:
+            val_row.extend([val_metrics["latent_mse"], mean_baseline])
         writer.writerow(val_row)
         csvfile.close()
 
         latent_csv = open(result_dir / "validation_latent.csv", 'a+', newline='')
         latent_writer = csv.writer(latent_csv)
         if latent_csv.tell() == 0:
-            latent_writer.writerow(['Epoch', 'latent_MSE', 'latent_MAE', 'PSNR', 'SSIM'])
-        latent_writer.writerow([
+            latent_header = ['Epoch', 'latent_MSE', 'latent_MAE', 'PSNR', 'SSIM']
+            if mean_baseline is not None:
+                latent_header.append('latent_MSE_mean_baseline')
+            latent_writer.writerow(latent_header)
+        latent_row = [
             epoch + 1,
             val_metrics["latent_mse"],
             val_metrics["latent_mae"],
             val_metrics["psnr"],
             val_metrics["ssim"],
-        ])
+        ]
+        if mean_baseline is not None:
+            latent_row.append(mean_baseline)
+        latent_writer.writerow(latent_row)
         latent_csv.close()
 
         cls_bal_acc = None
@@ -848,20 +1096,32 @@ def train_LDM():
             cls_writer.writerow([epoch + 1, cls_bal_acc])
             cls_csv.close()
 
+        min_delta = float(getattr(config, "EARLY_STOP_MIN_DELTA", 0.0) or 0.0)
         if config.EARLY_STOP_CLS_METRIC:
-            improved = cls_bal_acc is not None and cls_bal_acc > best_bal_acc
+            improved = cls_bal_acc is not None and cls_bal_acc > best_bal_acc + min_delta
             if improved:
                 best_bal_acc = cls_bal_acc
         elif config.EARLY_STOP_LATENT_METRIC:
             # Explicit criterion: lower latent MSE is better.
-            improved = val_metrics["latent_mse"] < best_latent_mse
+            improved = val_metrics["latent_mse"] < best_latent_mse - min_delta
             if improved:
                 best_latent_mse = val_metrics["latent_mse"]
         else:
             validation_score = val_metrics["psnr"] + val_metrics["ssim"] * 10
-            improved = validation_score > best_validation_score
+            improved = validation_score > best_validation_score + min_delta
             if improved:
                 best_validation_score = validation_score
+
+        if wandb_run is not None:
+            wlog = {
+                "epoch": epoch + 1,
+                "val/psnr": val_metrics["psnr"],
+                "val/ssim": val_metrics["ssim"],
+                "val/latent_mse": val_metrics["latent_mse"],
+            }
+            if cls_bal_acc is not None:
+                wlog["val/balanced_accuracy"] = cls_bal_acc
+            wandb_run.log(wlog, step=epoch + 1)
 
         # test part
         if improved:
@@ -910,6 +1170,16 @@ def train_LDM():
                 test_metrics["ssim"],
             ])
             test_latent_csv.close()
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        "epoch": epoch + 1,
+                        "test/psnr": test_metrics["psnr"],
+                        "test/ssim": test_metrics["ssim"],
+                        "test/latent_mse": test_metrics["latent_mse"],
+                    },
+                    step=epoch + 1,
+                )
         else:
             validations_without_improvement += 1
             print(
@@ -919,6 +1189,10 @@ def train_LDM():
             if validations_without_improvement >= config.early_stopping_patience:
                 print(f"Stopping LDM early at epoch {epoch + 1}")
                 break
+
+    if wandb_run is not None:
+        wandb_run.finish()
+
 
 if __name__ == '__main__':
     seed_torch()

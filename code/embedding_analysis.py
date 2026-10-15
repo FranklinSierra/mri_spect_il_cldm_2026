@@ -64,7 +64,9 @@ def classifier_params(model):
 
 
 def build_classical_models(y_train, exclude: set[str] | None = None):
-    exclude = exclude or set()
+    exclude = set(exclude or set())
+    if not getattr(config, "INCLUDE_SVM", False):
+        exclude.update({"SVM_RBF", "SVM_linear"})
     knn_auto = min(5, len(y_train))
     if knn_auto % 2 == 0:
         knn_auto -= 1

@@ -4,7 +4,9 @@ data_rois/*
 dataV2/*
 result/*
 temp_data/*
+# Sibling repos. Kept ignored so a nested leftover is never committed.
 CoCoLIT/
+IL-FST/
 
 # Local-only docs (reports with internal paths, large PDFs, audit JSON, etc.)
 docs/local/

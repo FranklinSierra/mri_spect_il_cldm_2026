@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from losses.contrastive import (
+    ClassAwareCrossModalInfoNCE,
     ContrastiveProjector,
     CrossModalInfoNCE,
     SupervisedContrastiveLoss,
@@ -53,3 +54,25 @@ def test_contrastive_projector_output_dim():
     proj = ContrastiveProjector(in_dim=16, out_dim=32)
     out = proj(torch.randn(3, 16))
     assert out.shape == (3, 32)
+
+
+def test_class_aware_infonce_excludes_same_class_negatives():
+    crit = ClassAwareCrossModalInfoNCE(temperature=0.5)
+    z_img = torch.randn(4, 32, requires_grad=True)
+    z_txt = torch.randn(4, 32)
+    labels = torch.tensor([0, 0, 1, 1])
+    loss = crit(z_img, z_txt, labels)
+    assert loss.ndim == 0
+    loss.backward()
+    assert z_img.grad is not None
+
+
+def test_class_aware_infonce_differs_from_standard_when_same_class_in_batch():
+    crit_std = CrossModalInfoNCE(temperature=0.5)
+    crit_ca = ClassAwareCrossModalInfoNCE(temperature=0.5)
+    z_img = torch.randn(4, 32)
+    z_txt = torch.randn(4, 32)
+    labels = torch.tensor([0, 0, 1, 1])
+    loss_std = float(crit_std(z_img, z_txt).item())
+    loss_ca = float(crit_ca(z_img, z_txt, labels).item())
+    assert loss_std != loss_ca

@@ -101,6 +101,23 @@ def encode_mri_condition(mri_encoder: nn.Module, mri: torch.Tensor, space: Featu
     return channel_mean_to_one(h64)
 
 
+def encode_mri_dual(
+    mri_encoder: nn.Module,
+    mri: torch.Tensor,
+    space: FeatureSpace | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Single encoder pass → (concat condition map, h64 map for spatial FiLM)."""
+    space = space or resolve_diffusion_feature_space()
+    latent, h64 = mri_encoder(mri, return_hidden=True)
+    if space == "z18k":
+        mri_cond = apply_feature_space_to_map(latent, space)
+    elif space == "h64":
+        mri_cond = h64
+    else:
+        mri_cond = channel_mean_to_one(h64)
+    return mri_cond, h64
+
+
 class SpectBottleneckProjector(nn.Module):
     """Bonus: map h64 → z18k using the frozen last Conv3d of a SPECT encoder."""
 

@@ -1,0 +1,16 @@
+{
+  "mri": {
+    "lo": 0.0,
+    "hi": 454.3918128967289,
+    "percentile_lo": 0.5,
+    "percentile_hi": 99.5,
+    "n_subjects": 147
+  },
+  "spect": {
+    "lo": 0.004805048636626455,
+    "hi": 2.4015977203846006,
+    "percentile_lo": 0.5,
+    "percentile_hi": 99.5,
+    "n_subjects": 147
+  }
+}

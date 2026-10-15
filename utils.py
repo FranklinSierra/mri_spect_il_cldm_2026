@@ -4,6 +4,7 @@ import torch
 import config
 import random
 import os
+import csv
 import json
 import subprocess
 import datetime
@@ -21,7 +22,7 @@ def save_checkpoint(model, optimizer, filename="my_checkpoint.pth.tar"):
     print("=> Saving checkpoint")
     checkpoint = {
         "state_dict": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
     }
     torch.save(checkpoint, filename)
 
@@ -103,6 +104,55 @@ def load_checkpoint(checkpoint_file, model, optimizer, lr, model_name=None):
             param_group["lr"] = lr
 
 
+def last_csv_metric_row(path):
+    path = Path(path)
+    if not path.is_file():
+        return None
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    return rows[-1] if rows else None
+
+
+def resolve_aae_resume(checkpoint_path, result_dir, run_name):
+    """If ILCLDM_AAE_RESUME=1, return (start_epoch, best_average, should_load).
+
+    AAE.pth.tar stores generator weights + Adam state, not epoch or discriminator.
+    start_epoch is the 0-indexed loop index of the next epoch to train, inferred
+    from the last validation CSV Epoch (1-indexed, already completed).
+    """
+    if os.getenv("ILCLDM_AAE_RESUME", "0") != "1":
+        return 0, 0.0, False
+
+    ckpt = Path(checkpoint_path)
+    if not ckpt.is_file():
+        print(f"=> ILCLDM_AAE_RESUME=1 but missing {ckpt}; training from scratch")
+        return 0, 0.0, False
+
+    result_dir = Path(result_dir)
+    env_epoch = os.getenv("ILCLDM_AAE_RESUME_EPOCH", "").strip()
+    val_row = last_csv_metric_row(result_dir / f"{run_name}_validation.csv")
+    test_row = last_csv_metric_row(result_dir / f"{run_name}_test.csv")
+    if env_epoch:
+        last_completed = int(env_epoch)
+    elif val_row and val_row.get("Epoch"):
+        last_completed = int(float(val_row["Epoch"]))
+    elif test_row and test_row.get("Epoch"):
+        last_completed = int(float(test_row["Epoch"]))
+    else:
+        last_completed = 0
+
+    average = 0.0
+    if val_row and val_row.get("PSNR"):
+        average = float(val_row["PSNR"]) + float(val_row.get("SSIM") or 0.0) * 10.0
+
+    print(
+        f"=> Resuming AAE from {ckpt} after completed epoch {last_completed} "
+        f"(next logged epoch {last_completed + 1}, best_score={average:.4f}). "
+        "Discriminator is reinitialized (not stored in AAE.pth.tar)."
+    )
+    return last_completed, average, True
+
+
 def load_unet_init_checkpoint(model, checkpoint_file, optimizer=None, lr=None):
     """Load UNet weights for warm-start; adapts input conv when in_channel differs."""
     path = Path(checkpoint_file)
@@ -161,11 +211,16 @@ RUN_MANIFEST_CONFIG_KEYS = (
     "CHECKPOINT_AAE",
     "LATENT_LOSS",
     "LATENT_LOSS_LAMBDA",
+    "DIFFUSION_OBJECTIVE",
     "LATENT_CALIBRATION",
     "LATENT_MEAN",
     "LATENT_STD",
     "LATENT_STATS_PATH",
     "IMAGE_VOLUME_NORM",
+    "MINMAX_STATS_PATH",
+    "KL_LOSS",
+    "KL_LAMBDA",
+    "PRED_X0_CLAMP",
     "HIGH_T_SAMPLE_PROB",
     "HIGH_T_THRESHOLD",
     "AUX_IMAGE_LOSS",
@@ -192,6 +247,22 @@ RUN_MANIFEST_CONFIG_KEYS = (
     "CLS_LOSS",
     "CLS_LOSS_LAMBDA",
     "EARLY_STOP_CLS_METRIC",
+    "EARLY_STOP_MIN_DELTA",
+    "PRED_X0_CLAMP",
+    "PRED_X0_CLAMP_LO",
+    "PRED_X0_CLAMP_HI",
+    "SAMPLING_T_MAX",
+    "LABEL_DROPOUT_PROB",
+    "EMA_BETA",
+    "EMA_BETA_START",
+    "EMA_WARMUP_STEPS",
+    "EMA_STEP_START",
+    "ATTN_RES",
+    "USE_FILM",
+    "FILM_MODE",
+    "FILM_COND_CHANNELS",
+    "USE_WANDB",
+    "INCLUDE_SVM",
     "epochs",
     "learning_rate",
     "batch_size",
@@ -201,6 +272,60 @@ RUN_MANIFEST_CONFIG_KEYS = (
     "sampling_steps",
     "ddim_eta",
 )
+
+
+def restore_diffusion_objective(env, cfg):
+    """Copy ILCLDM_DIFFUSION_OBJECTIVE from a run manifest onto live config."""
+    objective = None
+    if env:
+        objective = env.get("ILCLDM_DIFFUSION_OBJECTIVE")
+    if objective is None and cfg and "DIFFUSION_OBJECTIVE" in cfg:
+        objective = cfg["DIFFUSION_OBJECTIVE"]
+    if objective is None or not str(objective).strip():
+        return None
+    mode = str(objective).strip().lower()
+    if mode not in ("epsilon", "x0"):
+        raise ValueError(
+            f"DIFFUSION_OBJECTIVE in run_manifest must be epsilon|x0, got {mode!r}"
+        )
+    config.DIFFUSION_OBJECTIVE = mode
+    return mode
+
+
+def _manifest_flag(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "y")
+
+
+def restore_kl_image_flags(env, cfg):
+    """Restore KL and minmax settings that change the AAE and the x0 clamp."""
+    env = env or {}
+    cfg = cfg or {}
+
+    def pick(env_key, cfg_key):
+        if env_key in env and env.get(env_key) not in (None, ""):
+            return env.get(env_key)
+        if cfg_key in cfg and cfg.get(cfg_key) not in (None, ""):
+            return cfg.get(cfg_key)
+        return None
+
+    kl = pick("ILCLDM_KL_LOSS", "KL_LOSS")
+    if kl is not None:
+        config.KL_LOSS = _manifest_flag(kl)
+    kl_lambda = pick("ILCLDM_KL_LAMBDA", "KL_LAMBDA")
+    if kl_lambda is not None:
+        config.KL_LAMBDA = float(kl_lambda)
+    stats_path = pick("ILCLDM_MINMAX_STATS_PATH", "MINMAX_STATS_PATH")
+    if stats_path is not None:
+        config.MINMAX_STATS_PATH = str(stats_path)
+    clamp = pick("ILCLDM_PRED_X0_CLAMP", "PRED_X0_CLAMP")
+    if clamp is not None:
+        config.PRED_X0_CLAMP = float(clamp)
+        lo = pick("ILCLDM_PRED_X0_CLAMP_LO", "PRED_X0_CLAMP_LO")
+        hi = pick("ILCLDM_PRED_X0_CLAMP_HI", "PRED_X0_CLAMP_HI")
+        config.PRED_X0_CLAMP_LO = float(lo) if lo is not None else -config.PRED_X0_CLAMP
+        config.PRED_X0_CLAMP_HI = float(hi) if hi is not None else config.PRED_X0_CLAMP
 
 
 def dump_run_manifest(result_dir):

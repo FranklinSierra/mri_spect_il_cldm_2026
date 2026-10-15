@@ -99,3 +99,47 @@ class CrossModalInfoNCE(nn.Module):
         logits = torch.matmul(z_mri, z_spect.T) / self.temperature
         targets = torch.arange(n, device=z_mri.device, dtype=torch.long)
         return F.cross_entropy(logits, targets)
+
+
+class ClassAwareCrossModalInfoNCE(nn.Module):
+    """Cross-modal InfoNCE with soft-negative masking: same-class subjects excluded from denominator."""
+
+    def __init__(self, temperature: float = 0.1):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(
+        self,
+        z_img: torch.Tensor,
+        z_txt: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        if z_img.shape != z_txt.shape or z_img.ndim != 2:
+            raise ValueError(
+                f"z_img and z_txt must match shape (N, D); got {tuple(z_img.shape)} vs {tuple(z_txt.shape)}"
+            )
+        n = z_img.shape[0]
+        if n < 1:
+            return z_img.new_zeros(())
+
+        z_img = l2_normalize(z_img.float())
+        z_txt = l2_normalize(z_txt.float())
+        logits = torch.matmul(z_img, z_txt.T) / self.temperature
+        labels = labels.reshape(-1).long()
+
+        losses: list[torch.Tensor] = []
+        for i in range(n):
+            pos = logits[i, i]
+            not_self = torch.arange(n, device=z_img.device) != i
+            cross_class = labels != labels[i]
+            neg_mask = not_self & cross_class
+            if not neg_mask.any():
+                neg_mask = not_self
+            if not neg_mask.any():
+                continue
+            denom = torch.cat([pos.unsqueeze(0), logits[i][neg_mask]])
+            losses.append(-pos + torch.logsumexp(denom, dim=0))
+
+        if not losses:
+            return z_img.new_zeros(())
+        return torch.stack(losses).mean()

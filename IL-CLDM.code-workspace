@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../CoCoLIT"
+		},
+		{
+			"path": "../IL-FST"
+		},
+		{
+			"path": "../pasta-pd-ref"
+		}
+	],
+	"settings": {}
+}

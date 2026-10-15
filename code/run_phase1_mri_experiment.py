@@ -44,7 +44,13 @@ except ImportError:  # pragma: no cover - handled at runtime with a clear error.
     umap = None
 
 import config
-from dataset import OneDataset, TwoDataset, resolve_nifti_path
+from dataset import (
+    OneDataset,
+    TwoDataset,
+    dataset_image_to_model,
+    resolve_nifti_path,
+    stored_image_from_model,
+)
 from code.volume_shapes import get_latent_shape, get_volume_shape, get_working_volume_shape
 from losses import (
     CrossModalInfoNCE,
@@ -53,7 +59,7 @@ from losses import (
     spect_reconstruction_loss,
 )
 from main import batch_metric_scores
-from model import AAE, Discriminator
+from model import AAE, Discriminator, kl_standard_normal
 from utils import load_checkpoint, seed_torch
 
 
@@ -70,6 +76,12 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=config.learning_rate)
     parser.add_argument("--validation-interval", type=int, default=config.validation_interval)
     parser.add_argument("--patience", type=int, default=config.early_stopping_patience)
+    parser.add_argument(
+        "--min-delta",
+        type=float,
+        default=float(getattr(config, "EARLY_STOP_MIN_DELTA", 0.0) or 0.0),
+        help="Minimum score improvement to reset early-stopping patience",
+    )
     parser.add_argument("--max-subjects-per-split", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--skip-train", action="store_true")
@@ -422,7 +434,7 @@ def evaluate_reconstruction(model, split, args, out_csv):
                     f"Unexpected MRI reconstruction shape: {tuple(reconstructed.shape)} "
                     f"(expected {expected})"
                 )
-            batch_psnr, batch_ssim = batch_metric_scores(volume, reconstructed)
+            batch_psnr, batch_ssim = batch_metric_scores(volume, stored_image_from_model(reconstructed))
             subject_id = subject_id_from_name(names)
             rows.append({"ID": subject_id, "split": split, "PSNR": batch_psnr, "SSIM": batch_ssim})
             psnr_total += batch_psnr
@@ -533,6 +545,8 @@ def train_mri_autoencoder(args, path_map):
     best_score = -float("inf")
     validations_without_improvement = 0
     train_header = ["Epoch", "recon_loss", "disc_loss_epoch"]
+    if config.KL_LOSS:
+        train_header.append("kl_loss")
     if mode == "supcon":
         train_header.append("supcon_loss")
     if mode == "xmodal":
@@ -570,6 +584,7 @@ def train_mri_autoencoder(args, path_map):
 
         recon_loss_epoch = 0.0
         disc_loss_epoch = 0.0
+        kl_loss_epoch = 0.0
         supcon_loss_epoch = 0.0
         xmodal_loss_epoch = 0.0
         sample_count = 0
@@ -590,17 +605,26 @@ def train_mri_autoencoder(args, path_map):
                 volume = torch.as_tensor(np.expand_dims(volume, axis=1), dtype=torch.float32, device=config.device)
 
             # Single encoder forward: reuse latent for reconstruction; optional h64 for contrastive.
-            if mode in ("supcon", "xmodal"):
+            kl_loss = None
+            if config.KL_LOSS and mode == "recon":
+                latent, mu, logvar = model.encoder(volume, sample=True)
+                h64 = None
+                kl_loss = kl_standard_normal(mu, logvar)
+            elif mode in ("supcon", "xmodal"):
                 latent, h64 = encode_volume_maps(model.encoder, volume)
             else:
                 latent = model.encoder(volume)
                 h64 = None
             reconstructed = model.decoder(latent)
+            recon_target = dataset_image_to_model(volume)
 
             disc_fake = discriminator(reconstructed)
-            recon_loss = reconstruction_training_loss(volume, reconstructed)
+            recon_loss = reconstruction_training_loss(recon_target, reconstructed)
             generator_loss = -torch.mean(disc_fake)
-            loss = recon_loss * config.Lambda + generator_loss
+            if kl_loss is None:
+                loss = recon_loss * config.Lambda + generator_loss
+            else:
+                loss = recon_loss + config.KL_LAMBDA * kl_loss + generator_loss
 
             if mode == "supcon" and supcon_crit is not None:
                 z = contrastive_feature_tensor(latent, h64, feature_mode)
@@ -624,7 +648,7 @@ def train_mri_autoencoder(args, path_map):
             opt_disc.zero_grad()
             opt_model.step()
 
-            disc_real = discriminator(volume)
+            disc_real = discriminator(recon_target if config.IMAGE_VOLUME_NORM == "minmax" else volume)
             disc_fake_det = discriminator(reconstructed.detach())
             disc_loss_real = torch.mean(F.relu(1.0 - disc_real))
             disc_loss_fake = torch.mean(F.relu(1.0 + disc_fake_det))
@@ -637,12 +661,16 @@ def train_mri_autoencoder(args, path_map):
             sample_count += batch_size
             recon_loss_epoch += recon_loss.item() * batch_size
             disc_loss_epoch += disc_loss.item() * batch_size
+            if kl_loss is not None:
+                kl_loss_epoch += kl_loss.detach().item() * batch_size
 
         row = {
             "Epoch": epoch + 1,
             "recon_loss": recon_loss_epoch / max(sample_count, 1),
             "disc_loss_epoch": disc_loss_epoch / max(sample_count, 1),
         }
+        if config.KL_LOSS:
+            row["kl_loss"] = kl_loss_epoch / max(sample_count, 1)
         if mode == "supcon":
             row["supcon_loss"] = supcon_loss_epoch / max(supcon_steps, 1)
         if mode == "xmodal":
@@ -697,7 +725,7 @@ def train_mri_autoencoder(args, path_map):
         ]
         append_csv(path_map["reconstruction"] / "validation_summary.csv", val_row, val_header)
 
-        if score > best_score:
+        if score > best_score + float(getattr(args, "min_delta", 0.0) or 0.0):
             best_score = score
             validations_without_improvement = 0
             print(

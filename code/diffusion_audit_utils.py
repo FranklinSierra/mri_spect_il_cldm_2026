@@ -291,10 +291,19 @@ def predict_noise(
     label: torch.Tensor | None,
     precomputed: bool,
     use_label: bool,
+    mri_film: torch.Tensor | None = None,
 ):
     if use_label and label is not None:
-        return unet(x_t, cond, t, label, precomputed_condition=precomputed)
-    return unet(x_t, cond, t, label=None, precomputed_condition=precomputed)
+        return unet(
+            x_t, cond, t, label,
+            precomputed_condition=precomputed,
+            mri_film=mri_film,
+        )
+    return unet(
+        x_t, cond, t, label=None,
+        precomputed_condition=precomputed,
+        mri_film=mri_film,
+    )
 
 
 def one_step_denoise(
@@ -318,7 +327,7 @@ def one_step_denoise(
         x_t = forward_noisy(fwd, z_cal, int(t_val), eps)
         eps_true = eps
     eps_pred = predict_noise(unet, x_t, cond, t, label, precomputed, use_label)
-    z_hat_cal = diffusion.predict_x0(x_t, t, eps_pred)
+    z_hat_cal = diffusion.x0_from_model_output(x_t, t, eps_pred)
     return z_hat_cal, eps_true, eps_pred
 
 
@@ -391,7 +400,8 @@ def partial_ddim_sample(
     with torch.no_grad():
         for idx, timestep in enumerate(timesteps):
             t = torch.full((batch,), timestep.item(), dtype=torch.long, device=device)
-            predicted_noise = model_fn(x, cond, t)
+            model_output = model_fn(x, cond, t)
+            pred_x0, predicted_noise = diffusion.ddim_pred(x, t, model_output)
             alpha_hat = diffusion.alpha_hat[t][:, None, None, None, None]
             if idx == len(timesteps) - 1:
                 alpha_hat_prev = torch.ones_like(alpha_hat)
@@ -400,7 +410,6 @@ def partial_ddim_sample(
                     (batch,), timesteps[idx + 1].item(), dtype=torch.long, device=device
                 )
                 alpha_hat_prev = diffusion.alpha_hat[prev_t][:, None, None, None, None]
-            pred_x0 = (x - torch.sqrt(1 - alpha_hat) * predicted_noise) / torch.sqrt(alpha_hat)
             sigma = eta * torch.sqrt(
                 (1 - alpha_hat_prev) / (1 - alpha_hat) * (1 - alpha_hat / alpha_hat_prev)
             )
@@ -438,14 +447,14 @@ def _ddim_sample_with_trajectory(
         trajectory.append(x.detach().clone())
         for idx, timestep in enumerate(timesteps):
             t = torch.full((n,), timestep.item(), dtype=torch.long, device=cond.device)
-            predicted_noise = model(x, cond, t)
+            model_output = model(x, cond, t)
+            pred_x0, predicted_noise = diffusion.ddim_pred(x, t, model_output)
             alpha_hat = diffusion.alpha_hat[t][:, None, None, None, None]
             if idx == len(timesteps) - 1:
                 alpha_hat_prev = torch.ones_like(alpha_hat)
             else:
                 prev_t = torch.full((n,), timesteps[idx + 1].item(), dtype=torch.long, device=cond.device)
                 alpha_hat_prev = diffusion.alpha_hat[prev_t][:, None, None, None, None]
-            pred_x0 = (x - torch.sqrt(1 - alpha_hat) * predicted_noise) / torch.sqrt(alpha_hat)
             sigma = eta * torch.sqrt(
                 (1 - alpha_hat_prev) / (1 - alpha_hat) * (1 - alpha_hat / alpha_hat_prev)
             )

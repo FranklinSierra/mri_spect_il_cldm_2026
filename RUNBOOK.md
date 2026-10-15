@@ -737,6 +737,64 @@ CUDA_VISIBLE_DEVICES=<N> bash scripts/run_e1_mri_rois_xmodal_z18k.sh
 
 **Criterios:** `val_contrastive_loss` ≪ chance (`ln(B)` / `ln(B−1)`); SupCon within-cos < between-cos o bal.acc > baseline; xmodal top-1 retrieval > azar. Prioridad analítica: **z18k**.
 
+### E1 ROI SPECT 4 mm + MRI xmodal h64 (`data_rois/whole_Abeta_4mm`)
+
+Pipeline **aislado** para SPECT ROI **4 mm** (no `data_rois/whole_Abeta` 18 mm, no `data/whole_Abeta_4mm` full-brain). No pisa `spect_rois_reproc`, `latent_Abeta_reproc/` ni E2. No reanudar `exp_nm_s1_mri_rois_reproc_xmodal_h64` (18 mm, abortado).
+
+| Paso | `--exp` / script | Datos SPECT | Notas |
+|------|------------------|-------------|--------|
+| A — E1 SPECT | `exp_nm_s1_spect_rois_4mm` | `data_rois/whole_Abeta_4mm` | Latentes `data_rois/latent_Abeta_4mm/`; stats `data_info/latent_stats_latent_Abeta_rois_4mm.json` |
+| B — xmodal h64 | `exp_nm_s1_mri_rois_4mm_xmodal_h64` | mismo 4 mm | Init MRI `exp_nm_s1_mri_rois_reproc`; SPECT frozen = AAE del paso A |
+
+MRI: `data_rois/whole_MRI` (96×112×114; pad 96×112×116; h64 `64×24×28×29`). GPU por defecto **5**. `roi_profile_env.sh` no se modifica: los scripts exportan `ILCLDM_WHOLE_ABETA` **después** del `source`.
+
+```bash
+source scripts/roi_profile_env.sh
+# cadena (SPECT luego xmodal) en GPU 5:
+CUDA_VISIBLE_DEVICES=5 bash scripts/run_e1_rois_4mm_spect_then_xmodal.sh
+# o por pasos:
+CUDA_VISIBLE_DEVICES=5 bash scripts/run_e1_spect_rois_4mm.sh
+CUDA_VISIBLE_DEVICES=5 bash scripts/run_e1_mri_rois_4mm_xmodal_h64.sh
+```
+
+Misma receta xmodal 105³ (`λ=20`, `τ=0.5`, `--contrastive-features h64`). **Gate:** `run_config` con shape 96³ y SPECT ckpt `spect_rois_4mm`; BA flatten h64 claramente > recon reproc (~0.64). Referencia 105³ ~0.92.
+
+### Clasificador MobileNetV2-3D sobre recon AAE SPECT 4 mm
+
+Independiente del xmodal (puede correr en paralelo). Entrena un **MobileNetV2 inflado a 3D** sobre `recon = decoder(encoder(spect))` del AAE congelado — un CE por volumen (no voto de cortes). No toca E2 ni `registry.json`.
+
+| | |
+|--|--|
+| SPECT | `data_rois/whole_Abeta_4mm` |
+| AAE frozen | `result/exp_nm_s1_spect_rois_4mm/AAE.pth.tar` |
+| Salida | `result/exp_nm_cls_spect_aae_mnet3d/` (`best.pt`, `config.json`, `metrics_valid.json`, `metrics_test.json`, `recon_cache/`) |
+| GPU | **7** |
+
+```bash
+# GPU 7 is the launcher default (override with CLS_GPU=N if needed)
+bash scripts/run_cls_spect_aae_mnet3d_4mm.sh
+# o nohup:
+mkdir -p logs
+setsid nohup bash scripts/run_cls_spect_aae_mnet3d_4mm.sh \
+  > logs/cls_spect_aae_mnet3d_4mm.log 2>&1 < /dev/null &
+```
+
+**Gate (antes de FST):** BA val/test claramente > 0.5 sobre reconstrucciones. Si no supera el azar, el decoder no conserva señal diagnóstica útil para ponderar FST con 0.8 CE.
+
+**Run GPU 7 (completado):** early-stop época 24 (best época 9). Val/test **BA = 0.975**, ROC-AUC = 1.0 (`result/exp_nm_cls_spect_aae_mnet3d/metrics_*.json`). Gate azar **OK** (≫ 0.5; también > MRI recon ~0.64).
+
+### Feature-space transfer (FST / ARAD) — repo hermano
+
+El mapeo MRI h64 → SPECT h64 (UNet 64→64, sin difusión) vive en **`/workspace/IL-FST`**, no en este repo. Congela los gates de arriba (SPECT AAE 4 mm, MRI xmodal h64, MobileNet3D), loss \(0.2\,\mathrm{MSE}+0.8\,\mathrm{CE}\), GPU **6**. Ver `IL-FST/RUNBOOK_FST.md` y `result/fst_h64_arad/`. **No** mezclar con E2 ni con SPECT 18 mm / xmodal 105³.
+
+```bash
+cd /workspace/IL-FST && source env.sh
+bash scripts/smoke_fst_frozen.sh
+mkdir -p logs
+setsid nohup bash scripts/run_fst_h64_arad.sh \
+  > logs/fst_h64_arad.log 2>&1 < /dev/null &
+```
+
 ---
 
 ## Visualización rápida (z-score)
@@ -763,29 +821,36 @@ Réplicas del baseline calibrado `calib_roi3ch_uni` (full) y `calib_roi3ch_uni_r
 
 Cada par necesita **su propia** cadena E1 → latents → stats → E2 (no reutilizar AAE/latents entre `reproc` y `reproc_v2load`, ni con el baseline viejo).
 
-### Cadena full — par A (`legacy`)
+### Cadena full — par A (`legacy`, SPECT `whole_Abeta_4mm`)
+
+Full-brain con z-score MRI+SPECT (`legacy`). SPECT se lee de `data/whole_Abeta_4mm`.
+El E1 MRI **no se reentrena**: se reutiliza `exp_nm_s1_mri` (mismos volúmenes `data/whole_MRI`).
 
 ```bash
 cd /workspace/IL-CLDM
 export ILCLDM_IMAGE_VOLUME_NORM=legacy
+export ILCLDM_WHOLE_ABETA=data/whole_Abeta_4mm
+export ILCLDM_WHOLE_MRI=data/whole_MRI
 export ILCLDM_LATENT_ABETA=data/latent_Abeta_reproc/
 export ILCLDM_LATENT_STATS_PATH=data_info/latent_stats_latent_Abeta_reproc.json
 
+# 1) E1 SPECT + encode (desde whole_Abeta_4mm)
 scripts/run_experiment.sh s1_spect exp_nm_s1_spect_reproc
 # → result/exp_nm_s1_spect_reproc/AAE.pth.tar + data/latent_Abeta_reproc/
 
-scripts/run_experiment.sh s1_mri exp_nm_s1_mri_reproc
-# → result/exp_nm_s1_mri_reproc/phase1_mri/checkpoints/MRI_AAE.pth.tar
-
+# 2) Stats de calibración (no hace falta s1_mri_reproc)
 python3 -c "from dataset import get_latent_stats; print(get_latent_stats())"
 
+# 3) E2 (registry: MRI checkpoint = exp_nm_s1_mri, SPECT path = whole_Abeta_4mm)
 python3 scripts/run_ablation.py calib_roi3ch_uni_reproc --gpu <N>
+# → result/exp_nm_s2_frozen_calib_roi3ch_uni_reproc/
 
+# 4) Inferencia + clasificación
 python3 inference.py \
   --exp exp_nm_s2_frozen_calib_roi3ch_uni_reproc \
   --run-id calib_roi3ch_uni_reproc \
   --mri-encoder-mode frozen \
-  --mri-encoder-checkpoint result/exp_nm_s1_mri_reproc/phase1_mri/checkpoints/MRI_AAE.pth.tar \
+  --mri-encoder-checkpoint result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar \
   --save-synthetic-spect --splits train test
 # → classification/classification_metrics.csv bajo result/.../inference/<run_id>/
 ```
@@ -838,6 +903,136 @@ python3 inference.py \
 
 `inference.py` restaura `IMAGE_VOLUME_NORM`, paths y split desde `run_manifest.json` (escrito en E2). Comparar: baseline legacy vs `_reproc` (efecto datos) y `_reproc` vs `_reproc_v2load` (efecto carga).
 
+### Evaluación NHY3 sobre embeddings reproc (`calib_roi3ch_uni_rois_reproc_nhy3`)
+
+Extensión de **análisis** (no reentrena LDM) sobre el mejor binario `calib_roi3ch_uni_rois_reproc`. Reusa `inference/.../reps/` + `metadata.csv`; remapa etiquetas desde `data_info/splits/nhy_v1/nhy_distribution.csv` (`control`→0, `pd_nhy1`→1, `pd_nhy2`→2). **Mantiene el split train/test de la inferencia** (no el `split` de `nhy_distribution.csv`). Salida en `classification_nhy3/` — **no** toca `classification/` binaria.
+
+| analysis_id | Parent | Tipo |
+|-------------|--------|------|
+| `calib_roi3ch_uni_rois_reproc_nhy3` | `calib_roi3ch_uni_rois_reproc` | `embedding_eval` (registry → `embedding_evals`) |
+
+```bash
+python3 scripts/classify_embeddings_nhy3.py
+python3 scripts/classify_embeddings_nhy3.py --gpu 0
+```
+
+Salida: `result/exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc/inference/calib_roi3ch_uni_rois_reproc/classification_nhy3/`.
+
+### Estadio PD HY1 vs HY2 — ClinicalBERT + CLIP v2 (`clinical_staging_pd_nhy12`)
+
+Pipeline **PD-only** (109 sujetos: train 89, test 20) para clasificar **H&Y estadio 1 vs 2** con prompts clínicos neutros (sinHY, EN) + embeddings **ClinicalBERT** + alineación **CLIP** imagen–texto frente a baselines KNN (imagen y texto). Split **primario** `data_info/train.txt` + `test.txt` (no el `split` de `nhy_distribution.csv`).
+
+**CLIP v2:** loss híbrida `L = 0.5·ClassAwareInfoNCE + 1.0·SupCon(img)`; `StandardScaler` en latentes congelados (img+txt); early stop por **menor `val_supcon_loss`** (`min_epochs=5`, `patience=20`, `seed=42`). Evaluación en dos fases: **alineación** (`metrics_alignment.csv`, retrieval R@1) vs **staging** (`metrics_staging.csv`, prototipos + KNN joint + late fusion ML en `clip/fusion/`). Referencia baseline: KNN imagen crudo k=5 **BA ≈ 0.64** en test.
+
+| analysis_id | Parent radiológico | Salida unificada |
+|-------------|-------------------|------------------|
+| `clinical_staging_pd_nhy12` | `calib_roi3ch_uni_rois_reproc` (solo lectura) | `result/clinical_staging_pd/` |
+
+**GPU:** pasos con CUDA usan **GPU 7** por defecto. **Lanzamiento:** siempre con `nohup` (logs en `logs/`).
+
+```bash
+mkdir -p logs
+export CUDA_VISIBLE_DEVICES=7
+
+# Pipeline completo (secuencial)
+setsid nohup bash scripts/run_clinical_staging_pd.sh \
+  > logs/clinical_staging_pd.log 2>&1 < /dev/null &
+
+# O paso a paso:
+setsid nohup python3 scripts/extract_clinical_text_embeddings.py \
+  --out-root result/clinical_staging_pd --gpu 7 \
+  > logs/clinical_staging_text_embeddings.log 2>&1 < /dev/null &
+
+setsid nohup python3 scripts/classify_nhy_staging_pd.py \
+  --out-root result/clinical_staging_pd \
+  > logs/clinical_staging_baselines.log 2>&1 < /dev/null &
+
+# CLIP v2 (entrenamiento + eval post-hoc staging/fusion)
+setsid nohup python3 scripts/train_clinical_radiology_clip.py \
+  --out-root result/clinical_staging_pd --gpu 7 \
+  --lambda-infonce 0.5 --lambda-supcon 1.0 --seed 42 \
+  > logs/clinical_staging_clip_v2.log 2>&1 < /dev/null &
+```
+
+Árbol de salida:
+
+```
+result/clinical_staging_pd/
+  run_config.json
+  clinical_pairs.csv
+  prompts.csv
+  text_embeddings/
+  baselines/          # KNN k=5 imagen + texto; BA, recall_hy1/hy2, f1, AUC
+  clip/
+    training_history.csv      # val_supcon_loss (early stop), val_retrieval_r1 (diagnóstico)
+    metrics_alignment.csv   # retrieval R@1 (alineación img↔texto)
+    metrics_staging.csv       # Proto_text/image/avg, KNN_joint (BA, recall, f1, AUC)
+    fusion/                   # late fusion: KNN, LogReg, SVM, DNN sobre [z_img; z_txt]
+    checkpoints/
+      projectors.pt
+      feature_scalers.joblib
+```
+
+Entrada clínica: `MDS-UPDRS_Part_III_28Oct2025_estandarizado_pd_mbrs.csv`. Latentes imagen: `result/exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc/inference/calib_roi3ch_uni_rois_reproc/` (`sampled_latent_final`).
+
+### E2 ROI reproc + spatial FiLM (`calib_roi3ch_uni_rois_reproc_film_ms`)
+
+Ablación **única** sobre `calib_roi3ch_uni_rois_reproc`: condicionamiento MRI espacial en cada `ResnetBlock` vía mapa **h64** (`γ,β` por vóxel; resize trilinear por nivel UNet). Difusión SPECT sigue en **z18k**; concat z18+ROI sin cambios. EMA legacy (sin warmup).
+
+| Clave registry | Parent | Delta |
+|----------------|--------|-------|
+| `calib_roi3ch_uni_rois_reproc_film_ms` | `calib_roi3ch_uni_rois_reproc` | `ILCLDM_FILM_MODE=spatial_ms` |
+
+```bash
+source scripts/roi_profile_env.sh
+
+# Smoke VRAM (1 época)
+ILCLDM_EPOCHS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 scripts/run_ablation.py calib_roi3ch_uni_rois_reproc_film_ms --gpu <N>
+
+# Entrenamiento
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 scripts/run_ablation.py calib_roi3ch_uni_rois_reproc_film_ms --gpu <N>
+
+# Inferencia + clasificación (métrica guía: F1/recall embedding DDIM)
+python3 inference.py \
+  --exp exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_film_ms \
+  --run-id calib_roi3ch_uni_rois_reproc_film_ms \
+  --mri-encoder-mode frozen \
+  --mri-encoder-checkpoint result/exp_nm_s1_mri_rois_reproc/phase1_mri/checkpoints/MRI_AAE.pth.tar \
+  --save-synthetic-spect --splits train test
+```
+
+Si OOM en batch 8, añadir `"ILCLDM_BATCH_SIZE": "4"` en overrides del registry. UNet **scratch** (no warm-start desde parent).
+
+### E2 ROI reproc + spatial FiLM + MRI finetune (`calib_roi3ch_uni_rois_reproc_film_ms_ft`)
+
+Ablación **única** sobre `calib_roi3ch_uni_rois_reproc_film_ms`: el encoder MRI **deja de estar congelado** (`ILCLDM_MRI_ENCODER_MODE=finetune`). Parte del checkpoint E1 `exp_nm_s1_mri_rois_reproc` y se entrena junto al UNet (LR MRI = `ILCLDM_LR × 0.25`). AAE SPECT sigue congelado. UNet **scratch**. Mismos datos/FiLM/spatial_ms que el parent.
+
+| Clave registry | Parent | Delta |
+|----------------|--------|-------|
+| `calib_roi3ch_uni_rois_reproc_film_ms_ft` | `calib_roi3ch_uni_rois_reproc_film_ms` | `ILCLDM_MRI_ENCODER_MODE=finetune` |
+
+```bash
+source scripts/roi_profile_env.sh
+
+ILCLDM_EPOCHS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 scripts/run_ablation.py calib_roi3ch_uni_rois_reproc_film_ms_ft --gpu <N>
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 scripts/run_ablation.py calib_roi3ch_uni_rois_reproc_film_ms_ft --gpu <N>
+
+# Inferencia: usar el encoder MRI finetuned guardado en result/<exp>/
+python3 inference.py \
+  --exp exp_nm_s2_finetune_calib_roi3ch_uni_rois_reproc_film_ms \
+  --run-id calib_roi3ch_uni_rois_reproc_film_ms_ft \
+  --mri-encoder-mode finetune \
+  --mri-encoder-checkpoint result/exp_nm_s2_finetune_calib_roi3ch_uni_rois_reproc_film_ms/MRI_Encoder_finetuned.pth.tar \
+  --save-synthetic-spect --splits train test
+```
+
+Exportar `ILCLDM_FILM_MODE=spatial_ms` en inferencia si `apply_manifest_to_config` no restaura `FILM_MODE`.
+
 ---
 
 ## Troubleshooting
@@ -849,6 +1044,61 @@ python3 inference.py \
 | `MRI_ENCODER_CHECKPOINT` no encontrado | Completar E2; revisar ruta en E5/E4 |
 | AAE SPECT no encontrado en E3/E5/E4 | `cp result/exp_nm_s1_spect/AAE.pth.tar result/<exp_s2_*>/` |
 | Pérdidas raras tras cambiar datos | Vaciar `data/latent_*` y repetir `encoding()` (E1) |
+
+---
+
+## 5z. Full-brain port ROI→FB (`calib_fb_clamp` / `calib_fb_v2`)
+
+Rama `feat/fullbrain-roi-port`. Aplica los fixes validados en ROI sobre **datos full-brain** (`data/`, crop → `(160,192,160)`, latente `(40,48,40)`).
+
+### Env nuevos (defaults)
+
+| Variable | Default | Rol |
+|----------|---------|-----|
+| `ILCLDM_PRED_X0_CLAMP` | `4.0` | Clamp \|pred_x0\| en train + DDIM |
+| `ILCLDM_LABEL_DROPOUT_PROB` | `0` | Token nulo si >0 (embedding +1 fila) |
+| `ILCLDM_EMA_BETA` / `_START` | `0.995` / `0.9` | Warmup obligatorio de beta |
+| `ILCLDM_EMA_WARMUP_STEPS` / `_STEP_START` | `0` (=auto) | Auto: max(200, 5% steps) / max(1, 5% steps) |
+| `ILCLDM_ATTN_RES` | `4` | Full-brain v2: **`5` solo** (nunca `(5,10)`; OOM O(N²)) |)
+| `ILCLDM_USE_FILM` | `0` | FiLM global (GAP→MLP bias); legacy si `FILM_MODE=off` |
+| `ILCLDM_FILM_MODE` | `off` | `off` \| `global` \| `spatial_ms` (h64 γ/β por bloque) |
+| `ILCLDM_FILM_COND_CHANNELS` | `64` | Canales del mapa MRI para spatial FiLM (encoder h64) |
+| `ILCLDM_EARLY_STOP_MIN_DELTA` | `0` | Mejora mínima para resetear paciencia |
+| `ILCLDM_USE_WANDB` | `0` | Logging opcional |
+| `ILCLDM_INCLUDE_SVM` | `0` | SVM off (cuelga en latentes altos-D) |
+
+### Datos
+
+- IDs: 181 en `data_info` ↔ `data/whole_*`
+- Latentes train: `data/latent_Abeta/` (regenerados con `exp_nm_s1_spect`)
+- Stats: `data_info/latent_stats_latent_Abeta.json`
+- Máscara: `data/mask_basal_ganglia_full.nii.gz` (symlink `mask_basal_ganglia.nii.gz`)
+
+### Runs
+
+```bash
+# Smoke 1 época (memoria)
+ILCLDM_EPOCHS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 scripts/run_ablation.py calib_fb_clamp --gpu 1
+
+# Baseline clamp-only (legacy EMA/attn)
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 scripts/run_ablation.py calib_fb_clamp --gpu 1
+
+# Full improvements (needs ≥24GB VRAM at batch=2; A2000 12GB OOMs)
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 scripts/run_ablation.py calib_fb_v2 --gpu 1
+
+# Inferencia + clasificación (sin SVM) + proyecciones 2D/3D
+python3 inference.py --exp exp_nm_s2_frozen_calib_fb_clamp --run-id calib_fb_clamp \
+  --mri-encoder-mode frozen \
+  --mri-encoder-checkpoint result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar \
+  --save-synthetic-spect --splits train test
+```
+
+**VRAM:** `calib_fb_clamp` (attn@4, no FiLM) cabe en 12–24GB a `BATCH_SIZE=2`. `calib_fb_v2` (attn@5 + FiLM, 6 bloques attn) requiere **≥24GB** (4090/Titan RTX); en A2000 12GB falla OOM incluso con `expandable_segments`.
+
+Métrica guía A/B: **AUC / balanced accuracy del latente DDIM**, no PSNR.
 
 ---
 

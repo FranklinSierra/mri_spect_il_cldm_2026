@@ -52,13 +52,15 @@ cp .env.example .env   # optional: set HOST_DATA_DIR, CUDA_VISIBLE_DEVICES
 Then open `Remote Explorer > Dev Containers`, find `il-cldm-dev`, and
 attach to the running container.
 
-The same container also mounts CoCoLIT at `/workspace/CoCoLIT` (sibling
-project under `IL-CLDM/CoCoLIT/` on disk). See
-[CoCoLIT/RUNBOOK_COCOLIT.md](CoCoLIT/RUNBOOK_COCOLIT.md) for the baseline
-pipeline. To run CoCoLIT in its own container:
+The same container also mounts the sibling repos `/workspace/CoCoLIT` and
+`/workspace/IL-FST`. On disk they sit next to this repo
+(`projects/CoCoLIT`, `projects/IL-FST`), not inside it. MRI/SPECT volumes
+stay here (`data/`, `data_rois/`, `data_info/`). Both siblings read them
+through `ILCLDM_ROOT=/workspace/IL-CLDM`. The CoCoLIT baseline is documented
+in that repo's `RUNBOOK_COCOLIT.md`. To run CoCoLIT in its own container:
 
 ```bash
-cd IL-CLDM/CoCoLIT
+cd /path/to/CoCoLIT
 ./start_devcontainer.sh
 ```
 

@@ -28,6 +28,19 @@ fi
 
 mkdir -p "$HOST_DATA_DIR"
 
+PARENT_DIR="$(cd "$REPO_DIR/.." && pwd)"
+# Sibling repo if the host move already happened; otherwise the nested copy.
+resolve_sibling() {
+  local name="$1"
+  if [[ -d "$PARENT_DIR/$name/.git" ]]; then
+    echo "$PARENT_DIR/$name"
+  else
+    echo "$REPO_DIR/$name"
+  fi
+}
+COCOLIT_HOST="$(resolve_sibling CoCoLIT)"
+FST_HOST="$(resolve_sibling IL-FST)"
+
 docker run -d \
   --name "$CONTAINER_NAME" \
   --gpus all \
@@ -37,9 +50,12 @@ docker run -d \
   -e CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
   -e ILCLDM_EPOCHS="${ILCLDM_EPOCHS:-1000}" \
   -e ILCLDM_NOISE_STEPS="${ILCLDM_NOISE_STEPS:-1000}" \
+  -e ILCLDM_ROOT=/workspace/IL-CLDM \
   -v "$REPO_DIR:/workspace/IL-CLDM" \
-  -v "$REPO_DIR/CoCoLIT:/workspace/CoCoLIT" \
+  -v "$COCOLIT_HOST:/workspace/CoCoLIT" \
+  -v "$FST_HOST:/workspace/IL-FST" \
   -v "$HOST_DATA_DIR:/workspace/IL-CLDM/data" \
+  -v "$PARENT_DIR/pasta-pd-ref:/workspace/pasta-pd-ref" \
   -w /workspace/IL-CLDM \
   "$IMAGE_NAME" \
   sleep infinity

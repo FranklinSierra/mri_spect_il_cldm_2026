@@ -1,6 +1,7 @@
 import math
 import torch
 from torch import nn
+import torch.nn.functional as F
 import config
 from inspect import isfunction
 
@@ -59,11 +60,20 @@ class ResidualBlock(nn.Module):
         else:
             return x + self.block(x)
 
+def kl_standard_normal(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    """KL(q(z|x) || N(0, I)), averaged over every element. Zero when mu=0 and logvar=0."""
+    logvar = logvar.clamp(-30.0, 20.0)
+    return 0.5 * torch.mean(mu.pow(2) + logvar.exp() - 1.0 - logvar)
+
+
 class Encoder(nn.Module):
     def __init__(self, image_channels = 1, latent_dim =config.latent_dim):
         super(Encoder, self).__init__()
+        self.latent_dim = int(latent_dim)
+        self.kl = bool(getattr(config, "KL_LOSS", False))
         channels = [16, 32, 64]
         num_res_blocks = 1
+        out_channels_latent = self.latent_dim * (2 if self.kl else 1)
         layers = [nn.Conv3d(image_channels, channels[0], 3, 1, 1)]
         for i in range(len(channels)-1):
             in_channels = channels[i]
@@ -76,13 +86,29 @@ class Encoder(nn.Module):
         layers.append(ResidualBlock(channels[-1], channels[-1]))
         layers.append(GroupNorm(channels[-1]))
         layers.append(nn.ReLU())
-        layers.append(nn.Conv3d(channels[-1], latent_dim, 3, 1, 1))
+        layers.append(nn.Conv3d(channels[-1], out_channels_latent, 3, 1, 1))
         self.model = nn.Sequential(*layers)
 
-    def forward(self, x, return_hidden: bool = False):
-        # Last layer is Conv3d(64 -> latent_dim); preceding map is h64.
+    def _latent_from_stats(self, stats: torch.Tensor, sample: bool):
+        if not self.kl:
+            return stats, None, None
+        mu, logvar = stats.split(self.latent_dim, dim=1)
+        logvar = logvar.clamp(-30.0, 20.0)
+        if not sample:
+            return mu, mu, logvar
+        std = torch.exp(0.5 * logvar)
+        z = mu + std * torch.randn_like(std)
+        return z, mu, logvar
+
+    def forward(self, x, return_hidden: bool = False, sample: bool = False):
+        # Last layer is Conv3d(64 -> latent); preceding map is h64.
+        # With KL the conv emits (mu, logvar). Callers still receive mu unless sample=True.
         h64 = self.model[:-1](x)
-        latent = self.model[-1](h64)
+        latent, mu, logvar = self._latent_from_stats(self.model[-1](h64), sample=sample)
+        if sample:
+            if return_hidden:
+                return latent, h64, mu, logvar
+            return latent, mu, logvar
         if return_hidden:
             return latent, h64
         return latent
@@ -114,9 +140,13 @@ class Decoder(nn.Module):
         layers.append(nn.ReLU())
         layers.append(nn.Conv3d(in_channels, image_channels, 3, 1, 1))
         self.model = nn.Sequential(*layers)
+        self.bound_output = bool(getattr(config, "KL_LOSS", False))
 
     def forward(self, x):
-        return self.model(x)
+        decoded = self.model(x)
+        if self.bound_output:
+            return torch.tanh(decoded)
+        return decoded
 
 class AAE(nn.Module):
     def __init__(self):
@@ -207,25 +237,61 @@ class Block(nn.Module):
     def forward(self, x):
         return self.block(x)
 
-class ResnetBlock(nn.Module):
-    def __init__(self, dim, dim_out, time_emb_dim=None, dropout=0, norm_groups=32):
+
+class SpatialFiLM(nn.Module):
+    """Spatial scale-shift modulation from an MRI feature map (e.g. encoder h64)."""
+
+    def __init__(self, cond_channels: int, feat_channels: int):
         super().__init__()
+        self.proj = nn.Conv3d(cond_channels, 2 * feat_channels, kernel_size=1)
+
+    def forward(self, h: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        if cond.shape[2:] != h.shape[2:]:
+            cond = F.interpolate(
+                cond, size=h.shape[2:], mode="trilinear", align_corners=False
+            )
+        gamma, beta = self.proj(cond).chunk(2, dim=1)
+        return h * (1 + gamma) + beta
+
+
+class ResnetBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_out,
+        time_emb_dim=None,
+        cond_emb_dim=None,
+        dropout=0,
+        norm_groups=32,
+        spatial_film=None,
+    ):
+        super().__init__()
+        self.spatial_film = spatial_film
         self.mlp = nn.Sequential(
             Swish(),
             nn.Linear(time_emb_dim, dim_out)
         ) if exists(time_emb_dim) else None
+        self.cond_mlp = nn.Sequential(
+            Swish(),
+            nn.Linear(cond_emb_dim, dim_out)
+        ) if exists(cond_emb_dim) else None
 
         self.block1 = Block(dim, dim_out, groups=norm_groups)
         self.block2 = Block(dim_out, dim_out, groups=norm_groups, dropout=dropout)
         self.res_conv = nn.Conv3d(
             dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
-    def forward(self, x, time_emb):
+    def forward(self, x, time_emb, cond_emb=None, cond_spatial=None):
         h = self.block1(x)
-        if exists(self.mlp):
+        if self.spatial_film is not None and cond_spatial is not None:
+            h = self.spatial_film(h, cond_spatial)
+        if exists(self.mlp) and time_emb is not None:
             h += self.mlp(time_emb)[:, :, None, None, None]
+        if exists(self.cond_mlp) and cond_emb is not None:
+            h += self.cond_mlp(cond_emb)[:, :, None, None, None]
         h = self.block2(h)
         return h + self.res_conv(x)
+
 
 class SelfAttention(nn.Module):
     def __init__(self, in_channel, n_head=1, norm_groups=32):
@@ -244,7 +310,7 @@ class SelfAttention(nn.Module):
 
         norm = self.norm(input)
         qkv = self.qkv(norm).view(batch, n_head, head_dim * 3, height, width, depth)
-        query, key, value = qkv.chunk(3, dim=2)  # bhdyx
+        query, key, value = qkv.chunk(3, dim=2)
 
         attn = torch.einsum(
             "bnchwd, bncyxz -> bnhwdyxz", query, key
@@ -258,20 +324,40 @@ class SelfAttention(nn.Module):
 
         return out + input
 
+
 class ResnetBlocWithAttn(nn.Module):
-    def __init__(self, dim, dim_out, *, time_emb_dim=None, norm_groups=32, dropout=0, with_attn=False):
+    def __init__(
+        self,
+        dim,
+        dim_out,
+        *,
+        time_emb_dim=None,
+        cond_emb_dim=None,
+        norm_groups=32,
+        dropout=0,
+        with_attn=False,
+        spatial_film=None,
+    ):
         super().__init__()
         self.with_attn = with_attn
         self.res_block = ResnetBlock(
-            dim, dim_out, time_emb_dim, norm_groups=norm_groups, dropout=dropout)
+            dim,
+            dim_out,
+            time_emb_dim,
+            cond_emb_dim=cond_emb_dim,
+            norm_groups=norm_groups,
+            dropout=dropout,
+            spatial_film=spatial_film,
+        )
         if with_attn:
             self.attn = SelfAttention(dim_out, norm_groups=norm_groups)
 
-    def forward(self, x, time_emb):
-        x = self.res_block(x, time_emb)
-        if(self.with_attn):
+    def forward(self, x, time_emb, cond_emb=None, cond_spatial=None):
+        x = self.res_block(x, time_emb, cond_emb=cond_emb, cond_spatial=cond_spatial)
+        if self.with_attn:
             x = self.attn(x)
         return x
+
 
 class UNet(nn.Module):
     def __init__(
@@ -281,13 +367,25 @@ class UNet(nn.Module):
         inner_channel=128,
         norm_groups=32,
         channel_mults=(1, 2, 2, 4),
-        attn_res=(4,),
+        attn_res=None,
         res_blocks=2,
         dropout=0,
         with_time_emb=True,
-        image_size=40
+        image_size=40,
+        use_film=None,
+        film_mode=None,
     ):
         super().__init__()
+        if attn_res is None:
+            attn_res = tuple(config.ATTN_RES)
+        if film_mode is None:
+            film_mode = getattr(config, "FILM_MODE", "off")
+        if use_film is not None and use_film and film_mode == "off":
+            film_mode = "global"
+        self.film_mode = film_mode
+        use_global_film = film_mode == "global"
+        use_spatial_film = film_mode == "spatial_ms"
+        self.use_film = use_global_film
 
         if with_time_emb:
             time_dim = config.time_dim
@@ -301,32 +399,55 @@ class UNet(nn.Module):
             time_dim = None
             self.time_mlp = None
 
+        cond_emb_dim = time_dim if use_global_film and time_dim is not None else None
+        if use_global_film and time_dim is not None:
+            self.cond_proj = nn.Sequential(
+                nn.Linear(1, time_dim),
+                Swish(),
+                nn.Linear(time_dim, time_dim),
+            )
+        else:
+            self.cond_proj = None
+
+        film_cond_ch = int(getattr(config, "FILM_COND_CHANNELS", 64))
+
+        def _res_block(pre_ch, ch_mult, use_attn):
+            spatial_film = None
+            if use_spatial_film:
+                spatial_film = SpatialFiLM(film_cond_ch, ch_mult)
+            return ResnetBlocWithAttn(
+                pre_ch,
+                ch_mult,
+                time_emb_dim=time_dim,
+                cond_emb_dim=cond_emb_dim,
+                norm_groups=norm_groups,
+                dropout=dropout,
+                with_attn=use_attn,
+                spatial_film=spatial_film,
+            )
+
         num_mults = len(channel_mults)
         pre_channel = inner_channel
         feat_channels = [pre_channel]
         now_res = image_size
-        downs = [nn.Conv3d(in_channel, inner_channel,
-                           kernel_size=3, padding=1)]
+        downs = [nn.Conv3d(in_channel, inner_channel, kernel_size=3, padding=1)]
         for ind in range(num_mults):
             is_last = (ind == num_mults - 1)
             use_attn = (now_res in attn_res)
             channel_mult = inner_channel * channel_mults[ind]
             for _ in range(0, res_blocks):
-                downs.append(ResnetBlocWithAttn(
-                    pre_channel, channel_mult, time_emb_dim=time_dim, norm_groups=norm_groups, dropout=dropout, with_attn=use_attn))
+                downs.append(_res_block(pre_channel, channel_mult, use_attn))
                 feat_channels.append(channel_mult)
                 pre_channel = channel_mult
             if not is_last:
                 downs.append(Downsample(pre_channel))
                 feat_channels.append(pre_channel)
-                now_res = now_res//2
+                now_res = now_res // 2
         self.downs = nn.ModuleList(downs)
 
         self.mid = nn.ModuleList([
-            ResnetBlocWithAttn(pre_channel, pre_channel, time_emb_dim=time_dim, norm_groups=norm_groups,
-                               dropout=dropout, with_attn=True),
-            ResnetBlocWithAttn(pre_channel, pre_channel, time_emb_dim=time_dim, norm_groups=norm_groups, 
-                                dropout=dropout, with_attn=False)
+            _res_block(pre_channel, pre_channel, use_attn=True),
+            _res_block(pre_channel, pre_channel, use_attn=False),
         ])
 
         ups = []
@@ -334,19 +455,40 @@ class UNet(nn.Module):
             is_last = (ind < 1)
             use_attn = (now_res in attn_res)
             channel_mult = inner_channel * channel_mults[ind]
-            for _ in range(0, res_blocks+1):
-                ups.append(ResnetBlocWithAttn(
-                    pre_channel+feat_channels.pop(), channel_mult, time_emb_dim=time_dim, dropout=dropout, norm_groups=norm_groups, with_attn=use_attn))
+            for _ in range(0, res_blocks + 1):
+                ups.append(_res_block(
+                    pre_channel + feat_channels.pop(),
+                    channel_mult,
+                    use_attn,
+                ))
                 pre_channel = channel_mult
             if not is_last:
                 ups.append(Upsample(pre_channel))
-                now_res = now_res*2
+                now_res = now_res * 2
 
         self.ups = nn.ModuleList(ups)
         self.final_conv = Block(pre_channel, default(out_channel, in_channel), groups=norm_groups)
         self.cond = DiffusionConditioner()
-        self.label_emb = nn.Embedding(config.num_classes, time_dim)
-    
+        n_label_rows = config.num_classes + (1 if config.LABEL_DROPOUT_PROB > 0 else 0)
+        self.label_emb = nn.Embedding(n_label_rows, time_dim)
+        self.null_label_id = config.num_classes if config.LABEL_DROPOUT_PROB > 0 else None
+        self.attn_res = tuple(attn_res)
+
+    def count_attn_blocks(self) -> int:
+        return sum(
+            1
+            for module in list(self.downs) + list(self.mid) + list(self.ups)
+            if isinstance(module, ResnetBlocWithAttn) and module.with_attn
+        )
+
+    def count_spatial_film_blocks(self) -> int:
+        return sum(
+            1
+            for module in list(self.downs) + list(self.mid) + list(self.ups)
+            if isinstance(module, ResnetBlocWithAttn)
+            and module.res_block.spatial_film is not None
+        )
+
     def _concat_inputs(self, x, cond):
         if hasattr(self, "roi_latent"):
             roi = self.roi_latent.expand(x.shape[0], -1, -1, -1, -1)
@@ -362,36 +504,63 @@ class UNet(nn.Module):
             skip, size=decoder_feat.shape[2:], mode="nearest"
         )
 
-    def forward(self, x, y, time, label=None, precomputed_condition=False):
+    def _resolve_label(self, label, batch_size, device):
+        """Apply train dropout or null-token fallback for inference without label."""
+        if label is not None:
+            label = label.reshape(-1).long()
+            if (
+                self.training
+                and self.null_label_id is not None
+                and config.LABEL_DROPOUT_PROB > 0
+            ):
+                drop = torch.rand(label.shape[0], device=device) < config.LABEL_DROPOUT_PROB
+                label = label.clone()
+                label[drop] = int(self.null_label_id)
+            return label
+        if self.null_label_id is not None:
+            return torch.full(
+                (batch_size,), int(self.null_label_id), device=device, dtype=torch.long
+            )
+        return None
+
+    def forward(self, x, y, time, label=None, precomputed_condition=False, mri_film=None):
         target_shape = x.shape[2:]
         cond = y if precomputed_condition else self.cond(y)
+        cond_emb = None
+        if self.cond_proj is not None:
+            pooled = torch.nn.functional.adaptive_avg_pool3d(cond, 1).flatten(1)
+            cond_emb = self.cond_proj(pooled)
+        cond_spatial = mri_film if self.film_mode == "spatial_ms" else None
         x = self._concat_inputs(x, cond)
         feats = []
 
         t = self.time_mlp(time) if exists(self.time_mlp) else None
-        if label is not None:
-            label = label.squeeze()
-            label = label.long()
-            k = self.label_emb(label)
-            t =  t + k
+        label = self._resolve_label(label, x.shape[0], x.device)
+        if label is not None and t is not None:
+            t = t + self.label_emb(label)
 
         for layer in self.downs:
             if isinstance(layer, ResnetBlocWithAttn):
-                x = layer(x, t)
+                x = layer(x, t, cond_emb=cond_emb, cond_spatial=cond_spatial)
             else:
                 x = layer(x)
             feats.append(x)
 
         for layer in self.mid:
             if isinstance(layer, ResnetBlocWithAttn):
-                x = layer(x, t)
+                x = layer(x, t, cond_emb=cond_emb, cond_spatial=cond_spatial)
             else:
                 x = layer(x)
 
         for layer in self.ups:
             if isinstance(layer, ResnetBlocWithAttn):
                 skip = self._align_skip(x, feats.pop())
-                x = layer(torch.cat((x, skip), dim=1), t)
+                x = layer(
+                    torch.cat((x, skip), dim=1),
+                    t,
+                    cond_emb=cond_emb,
+                    cond_spatial=cond_spatial,
+                )
             else:
                 x = layer(x)
 
@@ -458,7 +627,13 @@ def build_unet(in_channel=None, use_roi_channel=None, out_channel=None):
     if out_channel is None:
         out_channel = diffusion_channels()
     latent_shape = get_latent_shape()
-    net = UNet(in_channel=in_channel, out_channel=out_channel, image_size=latent_shape[0])
+    net = UNet(
+        in_channel=in_channel,
+        out_channel=out_channel,
+        image_size=latent_shape[0],
+        attn_res=tuple(config.ATTN_RES),
+        film_mode=getattr(config, "FILM_MODE", "off"),
+    )
     if use_roi_channel:
         from code.roi_mask_utils import load_roi_latent_buffer
 
@@ -467,10 +642,37 @@ def build_unet(in_channel=None, use_roi_channel=None, out_channel=None):
 
 
 class EMA:
-    def __init__(self, beta):
+    """Exponential moving average with mandatory beta warmup after step_start."""
+
+    def __init__(
+        self,
+        beta=None,
+        beta_start=None,
+        warmup_steps=None,
+        step_start_ema=None,
+    ):
         super().__init__()
-        self.beta = beta
+        self.beta_end = float(config.EMA_BETA if beta is None else beta)
+        self.beta_start = float(config.EMA_BETA_START if beta_start is None else beta_start)
+        self.warmup_steps = int(
+            config.EMA_WARMUP_STEPS if warmup_steps is None else warmup_steps
+        )
+        self.step_start_ema = int(
+            config.EMA_STEP_START if step_start_ema is None else step_start_ema
+        )
         self.step = 0
+        self.beta = self.beta_start
+
+    def current_beta(self) -> float:
+        if self.step < self.step_start_ema:
+            return self.beta_start
+        steps_after = self.step - self.step_start_ema
+        if self.warmup_steps <= 0:
+            return self.beta_end
+        if steps_after < self.warmup_steps:
+            t = steps_after / float(self.warmup_steps)
+            return self.beta_start + t * (self.beta_end - self.beta_start)
+        return self.beta_end
 
     def update_model_average(self, ma_model, current_model):
         for current_params, ma_params in zip(current_model.parameters(), ma_model.parameters()):
@@ -482,11 +684,13 @@ class EMA:
             return new
         return old * self.beta + (1 - self.beta) * new
 
-    def step_ema(self, ema_model, model, step_start_ema=2000):
-        if self.step < step_start_ema:
+    def step_ema(self, ema_model, model, step_start_ema=None):
+        start = self.step_start_ema if step_start_ema is None else int(step_start_ema)
+        if self.step < start:
             self.reset_parameters(ema_model, model)
             self.step += 1
             return
+        self.beta = self.current_beta()
         self.update_model_average(ema_model, model)
         self.step += 1
 

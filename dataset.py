@@ -116,11 +116,88 @@ def infer_image_modality(path: str) -> str | None:
     return None
 
 
+def scale_to_unit_interval(data: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """Clip to the shared [lo, hi] rule and map that interval onto [0, 1]."""
+    data = np.asarray(data, dtype=np.float32)
+    span = float(hi) - float(lo)
+    if span <= 1e-8:
+        return np.zeros_like(data, dtype=np.float32)
+    scaled = (data - float(lo)) / span
+    return np.clip(scaled, 0.0, 1.0).astype(np.float32, copy=False)
+
+
+def load_minmax_bounds(modality: str, stats_path: str | None = None) -> tuple[float, float]:
+    """Train-set percentile bounds for one modality. The same pair is reused everywhere."""
+    if modality not in ("mri", "spect"):
+        raise ValueError(f"minmax bounds require modality mri|spect, got {modality!r}")
+    path = Path(stats_path or getattr(config, "MINMAX_STATS_PATH", "") or "")
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Missing minmax stats {path}. Compute them once on the train split "
+            "and point ILCLDM_MINMAX_STATS_PATH at that file."
+        )
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    entry = payload[modality]
+    return float(entry["lo"]), float(entry["hi"])
+
+
+def collect_minmax_bounds(root, task_file, percentile_lo=None, percentile_hi=None) -> dict:
+    """Percentiles of raw train voxels. Does not apply IMAGE_VOLUME_NORM."""
+    percentile_lo = config.MINMAX_PERCENTILE_LO if percentile_lo is None else percentile_lo
+    percentile_hi = config.MINMAX_PERCENTILE_HI if percentile_hi is None else percentile_hi
+    chunks = []
+    ids = read_list(task_file)
+    for image_id in ids:
+        raw = np.asarray(nib.load(resolve_nifti_path(root, image_id)).get_fdata(), dtype=np.float32)
+        chunks.append(raw.ravel())
+    values = np.concatenate(chunks) if chunks else np.zeros(1, dtype=np.float32)
+    lo, hi = np.percentile(values, [percentile_lo, percentile_hi])
+    return {
+        "lo": float(lo),
+        "hi": float(hi),
+        "percentile_lo": float(percentile_lo),
+        "percentile_hi": float(percentile_hi),
+        "n_subjects": int(len(ids)),
+    }
+
+
+def write_minmax_stats(mri_root, spect_root, train_file, out_path=None) -> dict:
+    """Write one shared lo/hi per modality. Not called during training from this repo."""
+    out_path = Path(out_path or config.MINMAX_STATS_PATH)
+    payload = {
+        "mri": collect_minmax_bounds(mri_root, train_file),
+        "spect": collect_minmax_bounds(spect_root, train_file),
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    return payload
+
+
+def dataset_image_to_model(volume):
+    """AAE / aux-loss space. Minmax images move from [0, 1] to [-1, 1]."""
+    if getattr(config, "IMAGE_VOLUME_NORM", "") != "minmax":
+        return volume
+    return volume * 2.0 - 1.0
+
+
+def stored_image_from_model(volume):
+    """Decoder output back to the dataset range. Minmax: tanh [-1, 1] to [0, 1]."""
+    if getattr(config, "IMAGE_VOLUME_NORM", "") != "minmax":
+        return volume
+    restored = (volume + 1.0) * 0.5
+    if hasattr(restored, "clamp"):
+        return restored.clamp(0.0, 1.0)
+    return np.clip(restored, 0.0, 1.0)
+
+
 def apply_image_volume_norm(
     data: np.ndarray,
     *,
     modality: str | None = None,
     norm_mode: str | None = None,
+    minmax_bounds: tuple[float, float] | None = None,
 ) -> np.ndarray:
     """
     Apply IMAGE_VOLUME_NORM policy to a scalar image volume.
@@ -128,9 +205,14 @@ def apply_image_volume_norm(
     - legacy: z-score over all voxels (any modality).
     - v2load + mri: z-score with stats from voxels > 0.
     - v2load + spect: return float32 unchanged.
+    - minmax: shared train percentiles, then scale to [0, 1].
     """
     mode = (norm_mode or getattr(config, "IMAGE_VOLUME_NORM", "legacy")).strip().lower()
     data = np.asarray(data, dtype=np.float32)
+    if mode == "minmax":
+        if minmax_bounds is None:
+            minmax_bounds = load_minmax_bounds(modality)
+        return scale_to_unit_interval(data, minmax_bounds[0], minmax_bounds[1])
     if mode == "v2load":
         if modality == "mri":
             return zscore_volume_foreground(data)
@@ -197,6 +279,42 @@ def _latent_stats_path(latent_dir):
         return Path(config.LATENT_STATS_PATH)
     base = Path(str(latent_dir).rstrip("/\\")).name or "latent"
     return REPO_ROOT / "data_info" / f"latent_stats_{base}.json"
+
+
+def write_latent_mu_report(output_root) -> dict:
+    """Mean, std and tails of cached mu. Does not z-score the files."""
+    files = _latent_files(output_root)
+    if not files:
+        return {}
+    chunks = []
+    for path in files:
+        if path.suffix == ".npy":
+            arr = np.load(path).astype(np.float64).ravel()
+        else:
+            arr = np.asarray(nib.load(str(path)).get_fdata(), dtype=np.float64).ravel()
+        chunks.append(arr)
+    values = np.concatenate(chunks)
+    std = float(values.std())
+    percentiles = {
+        name: float(np.percentile(values, pct))
+        for name, pct in (("p0.1", 0.1), ("p1", 1.0), ("p50", 50.0), ("p99", 99.0), ("p99.9", 99.9))
+    }
+    payload = {
+        "mean": float(values.mean()),
+        "std": std,
+        "variance": float(std * std),
+        "percentiles": percentiles,
+        "min": float(values.min()),
+        "max": float(values.max()),
+        "frac_abs_gt_4": float(np.mean(np.abs(values) > 4.0)),
+        "n_files": int(len(files)),
+        "n_voxels": int(values.size),
+    }
+    out_path = Path(output_root) / "latent_mu_report.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    return payload
 
 
 def get_latent_stats(latent_dir=None):

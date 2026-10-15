@@ -1,0 +1,4 @@
+experiment,training_mode,best_model,balanced_accuracy,roc_auc,contrastive_features,metric,value,random_chance
+exp_nm_s1_mri_rois_reproc,recon,KNN_K2,0.6388888888888888,0.5509259259259259,,,,
+exp_nm_s1_mri_rois_4mm_xmodal_h64,xmodal,SVM_linear,0.9583333333333331,0.986111111111111,h64,,,
+exp_nm_s1_mri_rois_4mm_xmodal_h64,,,,,,top1_retrieval_validation,0.058823529411764705,0.029411764705882353

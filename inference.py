@@ -34,6 +34,7 @@ from tqdm import tqdm
 import umap
 
 import config
+from dataset import stored_image_from_model
 from code.roi_mask_utils import try_load_roi_mask_numpy
 from code.volume_shapes import (
     clear_shape_cache,
@@ -46,7 +47,13 @@ from code.volume_shapes import (
 from dataset import TwoDataset, resolve_nifti_path
 from main import Diffusion, batch_metric_scores, batch_metric_scores_roi
 from model import AAE, MRIEncoder, UNet, LatentClsHead, build_unet
-from utils import load_checkpoint, load_cls_head_checkpoint, seed_torch
+from utils import (
+    load_checkpoint,
+    load_cls_head_checkpoint,
+    restore_diffusion_objective,
+    restore_kl_image_flags,
+    seed_torch,
+)
 
 
 def parse_args():
@@ -278,9 +285,9 @@ def apply_manifest_to_config(exp: str) -> dict | None:
         image_norm = cfg["IMAGE_VOLUME_NORM"]
     if image_norm is not None and str(image_norm).strip():
         mode = str(image_norm).strip().lower()
-        if mode not in ("legacy", "v2load"):
+        if mode not in ("legacy", "v2load", "minmax"):
             raise ValueError(
-                f"IMAGE_VOLUME_NORM in run_manifest must be legacy|v2load, got {mode!r}"
+                f"IMAGE_VOLUME_NORM in run_manifest must be legacy|v2load|minmax, got {mode!r}"
             )
         config.IMAGE_VOLUME_NORM = mode
 
@@ -304,6 +311,9 @@ def apply_manifest_to_config(exp: str) -> dict | None:
         calib = cfg["LATENT_CALIBRATION"]
     if calib is not None:
         config.LATENT_CALIBRATION = _manifest_bool(calib)
+
+    restore_diffusion_objective(env, cfg)
+    restore_kl_image_flags(env, cfg)
 
     if skip_crop is not None or roi_shape:
         clear_shape_cache()
@@ -939,12 +949,17 @@ def save_synthetic_nifti(out_dir, split, subject_id, synthetic_spect):
 
 
 def sample_latents(diffusion, unet, mri_encoder, MRI, sampling_steps, eta):
-    from code.diffusion_features import encode_mri_condition, resolve_diffusion_feature_space
+    from code.diffusion_features import encode_mri_dual, resolve_diffusion_feature_space
+    import config
 
     if mri_encoder is not None:
-        MRI_cond = encode_mri_condition(mri_encoder, MRI, resolve_diffusion_feature_space())
+        feat_space = resolve_diffusion_feature_space()
+        MRI_cond, MRI_film = encode_mri_dual(mri_encoder, MRI, feat_space)
+        film = MRI_film if config.FILM_MODE == "spatial_ms" else None
         return diffusion.sample(
-            lambda x, y, t: unet(x, y, t, precomputed_condition=True),
+            lambda x, y, t: unet(
+                x, y, t, mri_film=film, precomputed_condition=True
+            ),
             MRI_cond,
             sampling_steps=sampling_steps,
             eta=eta,
@@ -1016,7 +1031,9 @@ def generate_representations(args, split, aae, unet, mri_encoder, diffusion, out
                         aae,
                         torch.as_tensor(latent_np, device=device).unsqueeze(0),
                     )
-                    synthetic_np = synthetic_spect_i[0, 0].detach().cpu().numpy()
+                    synthetic_np = stored_image_from_model(
+                        synthetic_spect_i[0, 0].detach().cpu().numpy()
+                    )
                 target_np = Abeta[i].detach().cpu()
                 pred_np = torch.as_tensor(
                     np.expand_dims(synthetic_np, axis=(0, 1)), dtype=torch.float32
@@ -1060,9 +1077,9 @@ def generate_representations(args, split, aae, unet, mri_encoder, diffusion, out
                 })
                 continue
 
-            synthetic_np = synthetic_spect[i, 0].detach().cpu().numpy()
+            synthetic_np = stored_image_from_model(synthetic_spect[i, 0].detach().cpu().numpy())
             target_np = Abeta[i].detach().cpu()
-            pred_np = synthetic_spect[i].detach().cpu()
+            pred_np = stored_image_from_model(synthetic_spect[i].detach().cpu())
 
             rep_path = save_subject_representation(
                 out_dir,
@@ -1122,13 +1139,19 @@ def build_classical_models(y_train):
             ("classifier", classifier),
         ])
 
-    return {
+    models = {
         "KNN_auto": pipe(KNeighborsClassifier(n_neighbors=knn_auto, weights="distance")),
         "KNN_K2": pipe(KNeighborsClassifier(n_neighbors=knn_k2, weights="distance")),
-        "SVM_RBF": pipe(SVC(kernel="rbf", C=1.0, gamma="scale", probability=True, class_weight="balanced", random_state=42)),
-        "SVM_linear": pipe(SVC(kernel="linear", C=1.0, probability=True, class_weight="balanced", random_state=42)),
         "LogisticRegression": pipe(LogisticRegression(max_iter=5000, class_weight="balanced", random_state=42)),
     }
+    if getattr(config, "INCLUDE_SVM", False):
+        models["SVM_RBF"] = pipe(
+            SVC(kernel="rbf", C=1.0, gamma="scale", probability=True, class_weight="balanced", random_state=42)
+        )
+        models["SVM_linear"] = pipe(
+            SVC(kernel="linear", C=1.0, probability=True, class_weight="balanced", random_state=42)
+        )
+    return models
 
 
 def classifier_params(model):
@@ -1276,7 +1299,88 @@ def run_classification(out_dir, device):
     with open(class_dir / "dnn_classification_report.json", "w") as f:
         json.dump(report, f, indent=2)
     pd.DataFrame(confusion_matrix(y_test, dnn_pred)).to_csv(class_dir / "dnn_confusion_matrix.csv", index=False)
+
+    # 2D/3D projections of sampled latents (train+test) — same helpers as conditioning audit.
+    try:
+        save_sampled_latent_visualizations(
+            metadata,
+            out_dir,
+            title_prefix="sampled_latent_final",
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Latent projection visuals skipped: {exc}")
+
     return metrics
+
+
+def save_sampled_latent_visualizations(metadata, out_dir, title_prefix="sampled_latent_final"):
+    """PCA/t-SNE/UMAP of DDIM sampled latents for train+test (parametrized titles)."""
+    viz_dir = out_dir / "visualizations" / "sampled_latents"
+    viz_dir.mkdir(parents=True, exist_ok=True)
+    plot_metadata = metadata.copy()
+    plot_metadata["ID"] = plot_metadata["ID"].astype(str)
+    features, labels, splits, ids = [], [], [], []
+    for row in plot_metadata.itertuples(index=False):
+        if not hasattr(row, "representation_path") or not Path(row.representation_path).is_file():
+            continue
+        payload = np.load(row.representation_path)
+        if "sampled_latent_final" not in payload:
+            continue
+        features.append(payload["sampled_latent_final"].astype(np.float32).reshape(-1))
+        labels.append(int(row.label))
+        splits.append(str(row.split))
+        ids.append(str(row.ID))
+    if len(features) < 2:
+        return
+    X = np.asarray(features, dtype=np.float32)
+    y = np.asarray(labels, dtype=np.int64)
+    split_array = np.asarray(splits)
+    for method in ["pca", "tsne", "umap"]:
+        try:
+            coords_2d = _projection_coordinates(X, method, 2)
+        except Exception:
+            continue
+        df_2d = _projection_dataframe(coords_2d, ids, y, split_array, method)
+        df_2d.to_csv(viz_dir / f"{method}_2d.csv", index=False)
+        # Reuse scatter with custom title
+        x_col, y_col = f"{method}_1", f"{method}_2"
+        colors = {"control": "#3b6fd8", "parkinson": "#d83b5f"}
+        plt.figure(figsize=(8, 6))
+        for class_name in ["control", "parkinson"]:
+            class_df = df_2d[df_2d["class"] == class_name]
+            if class_df.empty:
+                continue
+            plt.scatter(
+                class_df[x_col],
+                class_df[y_col],
+                color=colors[class_name],
+                alpha=0.7,
+                label=class_name,
+            )
+        plt.xlabel(x_col)
+        plt.ylabel(y_col)
+        plt.title(f"{method.upper()} 2D {title_prefix}")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(viz_dir / f"{method}_2d.png", dpi=200)
+        plt.close()
+        try:
+            coords_3d = _projection_coordinates(X, method, 3)
+            df_3d = _projection_dataframe(coords_3d, ids, y, split_array, method)
+            df_3d.to_csv(viz_dir / f"{method}_3d.csv", index=False)
+            fig = px.scatter_3d(
+                df_3d,
+                x=f"{method}_1",
+                y=f"{method}_2",
+                z=f"{method}_3",
+                color="class",
+                color_discrete_map=colors,
+                hover_data=["ID", "label", "class", "split"],
+                title=f"{method.upper()} 3D {title_prefix}",
+            )
+            fig.write_html(viz_dir / f"{method}_3d.html")
+        except Exception:
+            pass
 
 
 def write_manifest(out_dir, args, checkpoint_aae, checkpoint_unet, mri_encoder_mode, mri_encoder_checkpoint):

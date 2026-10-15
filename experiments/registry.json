@@ -63,7 +63,7 @@
   },
   "base_calib_roi3ch_uni_reproc": {
     "ILCLDM_MRI_ENCODER_MODE": "frozen",
-    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri_reproc/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar",
     "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect_reproc/AAE.pth.tar",
     "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
     "ILCLDM_LATENT_CALIBRATION": "1",
@@ -72,6 +72,8 @@
     "ILCLDM_UNET_ROI_CHANNEL": "1",
     "ILCLDM_USE_TRAIN_LABEL": "1",
     "ILCLDM_IMAGE_VOLUME_NORM": "legacy",
+    "ILCLDM_WHOLE_MRI": "data/whole_MRI",
+    "ILCLDM_WHOLE_ABETA": "data/whole_Abeta_4mm",
     "ILCLDM_LATENT_ABETA": "data/latent_Abeta_reproc/",
     "ILCLDM_LATENT_STATS_PATH": "data_info/latent_stats_latent_Abeta_reproc.json"
   },
@@ -125,6 +127,32 @@
     "ILCLDM_WHOLE_ABETA": "data_rois/whole_Abeta",
     "ILCLDM_LATENT_ABETA": "data_rois/latent_Abeta_reproc_v2load/",
     "ILCLDM_LATENT_STATS_PATH": "data_info/latent_stats_latent_Abeta_rois_reproc_v2load.json",
+    "ILCLDM_ROI_VOLUME_SHAPE": "96,112,114",
+    "ILCLDM_REFERENCE_NIFTI": "data_rois/whole_MRI/3102.nii.gz",
+    "ILCLDM_ROI_MASK_PATH": "data_rois/roi_mask_unet.nii.gz"
+  },
+  "base_calib_roi3ch_uni_rois_reproc_minmax_kl": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri_rois_reproc_minmax_kl/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect_rois_reproc_minmax_kl/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
+    "ILCLDM_LATENT_CALIBRATION": "0",
+    "ILCLDM_HIGH_T_SAMPLE_PROB": "0",
+    "ILCLDM_HIGH_T_THRESHOLD": "700",
+    "ILCLDM_UNET_ROI_CHANNEL": "1",
+    "ILCLDM_USE_TRAIN_LABEL": "1",
+    "ILCLDM_IMAGE_VOLUME_NORM": "minmax",
+    "ILCLDM_MINMAX_STATS_PATH": "data_info/minmax_rois_p05_p995.json",
+    "ILCLDM_KL_LOSS": "1",
+    "ILCLDM_KL_LAMBDA": "1e-3",
+    "ILCLDM_FILM_MODE": "off",
+    "ILCLDM_USE_FILM": "0",
+    "ILCLDM_DIFFUSION_FEATURE_SPACE": "z18k",
+    "ILCLDM_PRED_X0_CLAMP": "4",
+    "ILCLDM_SKIP_CROP": "1",
+    "ILCLDM_WHOLE_MRI": "data_rois/whole_MRI",
+    "ILCLDM_WHOLE_ABETA": "data_rois/whole_Abeta",
+    "ILCLDM_LATENT_ABETA": "data_rois/latent_Abeta_minmax_kl/",
     "ILCLDM_ROI_VOLUME_SHAPE": "96,112,114",
     "ILCLDM_REFERENCE_NIFTI": "data_rois/whole_MRI/3102.nii.gz",
     "ILCLDM_ROI_MASK_PATH": "data_rois/roi_mask_unet.nii.gz"
@@ -410,11 +438,11 @@
     "calib_roi3ch_uni_reproc": {
       "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_reproc",
       "run_id": "calib_roi3ch_uni_reproc",
-      "label": "Reproc data + legacy load: latent calib + ROI 3ch + uniform t",
+      "label": "Full-brain SPECT 4mm + legacy z-score: latent calib + ROI 3ch + uniform t (MRI E1 reused)",
       "short_label": "calib_roi3ch_uni_reproc",
       "early_stop": "image",
       "base": "base_calib_roi3ch_uni_reproc",
-      "prerequisite": "E1 SPECT exp_nm_s1_spect_reproc + E1 MRI exp_nm_s1_mri_reproc; latentes data/latent_Abeta_reproc/; IMAGE_VOLUME_NORM=legacy",
+      "prerequisite": "E1 SPECT exp_nm_s1_spect_reproc on data/whole_Abeta_4mm; reuse E1 MRI exp_nm_s1_mri; latentes data/latent_Abeta_reproc/; IMAGE_VOLUME_NORM=legacy",
       "overrides": {}
     },
     "calib_roi3ch_uni_reproc_v2load": {
@@ -437,6 +465,107 @@
       "base": "base_calib_roi3ch_uni_rois_reproc",
       "prerequisite": "E1 SPECT exp_nm_s1_spect_rois_reproc + E1 MRI exp_nm_s1_mri_rois_reproc; latentes data_rois/latent_Abeta_reproc/; IMAGE_VOLUME_NORM=legacy",
       "overrides": {}
+    },
+    "calib_roi3ch_uni_rois_reproc_eps_x0": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_eps_x0",
+      "run_id": "calib_roi3ch_uni_rois_reproc_eps_x0",
+      "label": "ROI reproc diagnostic: epsilon MSE plus constant latent L1 (lambda 5)",
+      "short_label": "rois_reproc_eps_x0",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc",
+      "parent": "calib_roi3ch_uni_rois_reproc",
+      "prerequisite": "Same E1/latentes as calib_roi3ch_uni_rois_reproc; UNet scratch; noise MSE kept",
+      "overrides": {
+        "ILCLDM_LATENT_LOSS": "1",
+        "ILCLDM_LATENT_LOSS_LAMBDA": "5.0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_x0": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0",
+      "label": "ROI reproc diagnostic: predict clean latent with L1, no noise MSE",
+      "short_label": "rois_reproc_x0",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc",
+      "parent": "calib_roi3ch_uni_rois_reproc",
+      "prerequisite": "Same E1/latentes as calib_roi3ch_uni_rois_reproc; UNet scratch; objective x0 only",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl",
+      "label": "ROI minmax + KL AAE, predict clean latent with L1, no latent z-score",
+      "short_label": "rois_reproc_x0_minmax_kl",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0",
+      "prerequisite": "New E1 SPECT/MRI minmax+KL; latents data_rois/latent_Abeta_minmax_kl/; UNet scratch; objective x0 only",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "0",
+        "ILCLDM_PRED_X0_CLAMP": "4"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_calib": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_calib",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_calib",
+      "label": "ROI minmax + KL AAE, predict clean latent with L1, z-score the latent with train stats, clamp ±4",
+      "short_label": "rois_reproc_x0_minmax_kl_calib",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl",
+      "prerequisite": "Same E1 SPECT/MRI minmax+KL and data_rois/latent_Abeta_minmax_kl/ as the parent; UNet scratch; objective x0; latent calibration from data_info/latent_stats_latent_Abeta_minmax_kl.json",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "1",
+        "ILCLDM_LATENT_STATS_PATH": "data_info/latent_stats_latent_Abeta_minmax_kl.json",
+        "ILCLDM_PRED_X0_CLAMP": "4",
+        "ILCLDM_USE_ROI_LOSS": "0",
+        "ILCLDM_LATENT_LOSS": "0"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_film_ms": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_film_ms",
+      "run_id": "calib_roi3ch_uni_rois_reproc_film_ms",
+      "label": "ROI reproc baseline + spatial FiLM from MRI h64 (single delta; warmup EMA 0.9->0.995)",
+      "short_label": "rois_reproc_film_ms",
+      "early_stop": "image",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc",
+      "parent": "calib_roi3ch_uni_rois_reproc",
+      "prerequisite": "Baseline calib_roi3ch_uni_rois_reproc; same E1/latentes/stats; UNet scratch",
+      "overrides": {
+        "ILCLDM_FILM_MODE": "spatial_ms",
+        "ILCLDM_USE_FILM": "0",
+        "ILCLDM_LABEL_DROPOUT_PROB": "0"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_film_ms_ft": {
+      "exp": "exp_nm_s2_finetune_calib_roi3ch_uni_rois_reproc_film_ms",
+      "run_id": "calib_roi3ch_uni_rois_reproc_film_ms_ft",
+      "label": "ROI reproc + spatial FiLM h64 + MRI encoder finetune (single delta vs film_ms; UNet scratch)",
+      "short_label": "rois_reproc_film_ms_ft",
+      "early_stop": "image",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc",
+      "parent": "calib_roi3ch_uni_rois_reproc_film_ms",
+      "prerequisite": "Same E1/latentes as calib_roi3ch_uni_rois_reproc_film_ms; MRI starts from E1 then trains; SPECT AAE frozen; UNet scratch",
+      "overrides": {
+        "ILCLDM_MRI_ENCODER_MODE": "finetune",
+        "ILCLDM_FILM_MODE": "spatial_ms",
+        "ILCLDM_USE_FILM": "0",
+        "ILCLDM_LABEL_DROPOUT_PROB": "0"
+      }
     },
     "calib_roi3ch_uni_rois_reproc_v2load": {
       "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_v2load",
@@ -502,6 +631,105 @@
         "ILCLDM_AUX_IMAGE_LOSS": "0",
         "ILCLDM_EARLY_STOP_LATENT_METRIC": "1"
       }
+    },
+    "calib_fb_clamp": {
+      "exp": "exp_nm_s2_frozen_calib_fb_clamp",
+      "run_id": "calib_fb_clamp",
+      "label": "Full-brain: latent calib + ROI 3ch + pred_x0 clamp±4 (legacy EMA/attn)",
+      "short_label": "calib_fb_clamp",
+      "early_stop": "image",
+      "base": "base_calib_fb_clamp",
+      "prerequisite": "E1 SPECT/MRI full-brain; data/latent_Abeta/ + latent_stats regenerated for 181 IDs",
+      "overrides": {}
+    },
+    "calib_fb_v2": {
+      "exp": "exp_nm_s2_frozen_calib_fb_v2",
+      "run_id": "calib_fb_v2",
+      "label": "Full-brain: clamp±4 + label dropout 0.15 + EMA warmup + attn(5) + FiLM",
+      "short_label": "calib_fb_v2",
+      "early_stop": "image",
+      "base": "base_calib_fb_v2",
+      "prerequisite": "Same as calib_fb_clamp; compare AUC latente vs calib_fb_clamp",
+      "overrides": {}
+    }
+  },
+  "base_calib_fb_clamp": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
+    "ILCLDM_LATENT_CALIBRATION": "1",
+    "ILCLDM_LATENT_STATS_PATH": "data_info/latent_stats_latent_Abeta.json",
+    "ILCLDM_LATENT_ABETA": "./data/latent_Abeta/",
+    "ILCLDM_HIGH_T_SAMPLE_PROB": "0",
+    "ILCLDM_HIGH_T_THRESHOLD": "700",
+    "ILCLDM_UNET_ROI_CHANNEL": "1",
+    "ILCLDM_USE_TRAIN_LABEL": "1",
+    "ILCLDM_PRED_X0_CLAMP": "4.0",
+    "ILCLDM_LABEL_DROPOUT_PROB": "0",
+    "ILCLDM_BATCH_SIZE": "2",
+    "ILCLDM_ATTN_RES": "4",
+    "ILCLDM_USE_FILM": "0",
+    "ILCLDM_EMA_BETA": "0.9999",
+    "ILCLDM_EMA_BETA_START": "0.9999",
+    "ILCLDM_EMA_WARMUP_STEPS": "1",
+    "ILCLDM_EMA_STEP_START": "2000",
+    "ILCLDM_ROI_MASK_PATH": "data/mask_basal_ganglia_full.nii.gz",
+    "ILCLDM_EARLY_STOP_MIN_DELTA": "0.01"
+  },
+  "base_calib_fb_v2": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
+    "ILCLDM_LATENT_CALIBRATION": "1",
+    "ILCLDM_LATENT_STATS_PATH": "data_info/latent_stats_latent_Abeta.json",
+    "ILCLDM_LATENT_ABETA": "./data/latent_Abeta/",
+    "ILCLDM_HIGH_T_SAMPLE_PROB": "0",
+    "ILCLDM_HIGH_T_THRESHOLD": "700",
+    "ILCLDM_UNET_ROI_CHANNEL": "1",
+    "ILCLDM_USE_TRAIN_LABEL": "1",
+    "ILCLDM_PRED_X0_CLAMP": "4.0",
+    "ILCLDM_LABEL_DROPOUT_PROB": "0.15",
+    "ILCLDM_BATCH_SIZE": "2",
+    "ILCLDM_ATTN_RES": "5",
+    "ILCLDM_USE_FILM": "1",
+    "ILCLDM_EMA_BETA": "0.995",
+    "ILCLDM_EMA_BETA_START": "0.9",
+    "ILCLDM_EMA_WARMUP_STEPS": "0",
+    "ILCLDM_EMA_STEP_START": "0",
+    "ILCLDM_ROI_MASK_PATH": "data/mask_basal_ganglia_full.nii.gz",
+    "ILCLDM_EARLY_STOP_MIN_DELTA": "0.01"
+  },
+  "embedding_evals": {
+    "calib_roi3ch_uni_rois_reproc_nhy3": {
+      "analysis_id": "calib_roi3ch_uni_rois_reproc_nhy3",
+      "short_label": "rois_reproc_nhy3",
+      "type": "embedding_eval",
+      "task": "nhy3",
+      "parent": "calib_roi3ch_uni_rois_reproc",
+      "label": "NHY3 classification (CTL/HY1/HY2) on reproc DDIM embeddings; no resample; binary classification/ untouched",
+      "embedding_root": "result/exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc/inference/calib_roi3ch_uni_rois_reproc",
+      "out_subdir": "classification_nhy3",
+      "label_source": "data_info/splits/nhy_v1/nhy_distribution.csv",
+      "split_policy": "inference_metadata_split",
+      "class_map": {"control": 0, "pd_nhy1": 1, "pd_nhy2": 2},
+      "command": "python3 scripts/classify_embeddings_nhy3.py"
+    },
+    "clinical_staging_pd_nhy12": {
+      "analysis_id": "clinical_staging_pd_nhy12",
+      "short_label": "clinical_staging_pd",
+      "type": "embedding_eval",
+      "task": "pd_nhy12",
+      "parent": "calib_roi3ch_uni_rois_reproc",
+      "label": "PD-only HY1 vs HY2 with ClinicalBERT + CLIP image-text alignment; unified output tree",
+      "embedding_root": "result/exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc/inference/calib_roi3ch_uni_rois_reproc",
+      "out_root": "result/clinical_staging_pd",
+      "label_source": "data_info/splits/nhy_v1/nhy_distribution.csv",
+      "clinical_csv": "MDS-UPDRS_Part_III_28Oct2025_estandarizado_pd_mbrs.csv",
+      "split_policy": "primary data_info train/test",
+      "class_map": {"pd_nhy1": 0, "pd_nhy2": 1},
+      "command": "bash scripts/run_clinical_staging_pd.sh"
     }
   }
 }

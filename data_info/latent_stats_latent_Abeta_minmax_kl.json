@@ -1,0 +1,8 @@
+{
+  "mean": -0.14870218474624203,
+  "std": 0.5632211290537218,
+  "latent_dir": "data_rois/latent_Abeta_minmax_kl/",
+  "n_files": 147,
+  "mean_image_mse_raw": 0.06443416607548323,
+  "mean_image_mse_calibrated": 0.20312264092013713
+}
