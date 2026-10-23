@@ -115,6 +115,27 @@ def try_load_roi_mask_tensor(device: torch.device | str) -> torch.Tensor | None:
         return None
 
 
+def try_load_diffusion_roi_latent(device: torch.device | str) -> torch.Tensor | None:
+    """Latent-grid ROI mask for DIFFUSION_ROI_WEIGHT (primary x0 L1). None if off/missing."""
+    import config
+
+    weight = float(getattr(config, "DIFFUSION_ROI_WEIGHT", 0.0) or 0.0)
+    if weight <= 0:
+        return None
+    mask_path = Path(config.ROI_MASK_PATH)
+    if not mask_path.is_file():
+        print(
+            f"Warning: DIFFUSION_ROI_WEIGHT={weight} but mask missing at {mask_path}; "
+            "falling back to plain L1."
+        )
+        return None
+    try:
+        return load_roi_latent_buffer(mask_path).to(device)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"Warning: diffusion ROI latent invalid ({exc}); falling back to plain L1.")
+        return None
+
+
 def try_load_roi_mask_numpy() -> np.ndarray | None:
     """Load ROI mask for metrics, or None if missing."""
     import config

@@ -97,3 +97,39 @@ def test_svm_excluded_by_default(monkeypatch):
     models = build_classical_models([0, 1, 0, 1, 0, 1])
     assert "SVM_RBF" not in models
     assert "LogisticRegression" in models
+
+
+def test_grad_clip_norm_env_default_off(monkeypatch):
+    import importlib
+    import config
+
+    monkeypatch.delenv("ILCLDM_GRAD_CLIP_NORM", raising=False)
+    importlib.reload(config)
+    assert config.GRAD_CLIP_NORM == 0.0
+
+
+def test_grad_clip_norm_env_and_helper(monkeypatch):
+    import importlib
+    import config
+    from utils import maybe_clip_grad_norm, optimizer_trainable_params
+
+    monkeypatch.setenv("ILCLDM_GRAD_CLIP_NORM", "1.0")
+    importlib.reload(config)
+    assert config.GRAD_CLIP_NORM == 1.0
+
+    lin = torch.nn.Linear(4, 4)
+    opt = torch.optim.SGD(lin.parameters(), lr=0.1)
+    x = torch.randn(2, 4)
+    (lin(x).pow(2).mean() * 1000).backward()
+    total = maybe_clip_grad_norm(optimizer_trainable_params(opt))
+    assert total is not None
+    assert float(total) >= 1.0 - 1e-4
+    # After clip, L2 norm of grads should be <= max_norm
+    flat = torch.cat([p.grad.reshape(-1) for p in lin.parameters() if p.grad is not None])
+    assert float(flat.norm()) <= 1.0 + 1e-4
+
+    monkeypatch.setenv("ILCLDM_GRAD_CLIP_NORM", "0")
+    importlib.reload(config)
+    lin.zero_grad()
+    (lin(x).sum()).backward()
+    assert maybe_clip_grad_norm(optimizer_trainable_params(opt)) is None

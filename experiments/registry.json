@@ -157,6 +157,32 @@
     "ILCLDM_REFERENCE_NIFTI": "data_rois/whole_MRI/3102.nii.gz",
     "ILCLDM_ROI_MASK_PATH": "data_rois/roi_mask_unet.nii.gz"
   },
+  "base_calib_roi3ch_uni_rois_reproc_minmax_kl1e1": {
+    "ILCLDM_MRI_ENCODER_MODE": "frozen",
+    "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri_rois_reproc_minmax_kl1e1/phase1_mri/checkpoints/MRI_AAE.pth.tar",
+    "ILCLDM_AAE_CHECKPOINT": "result/exp_nm_s1_spect_rois_reproc_minmax_kl1e1/AAE.pth.tar",
+    "ILCLDM_EARLY_STOP_LATENT_METRIC": "0",
+    "ILCLDM_LATENT_CALIBRATION": "0",
+    "ILCLDM_HIGH_T_SAMPLE_PROB": "0",
+    "ILCLDM_HIGH_T_THRESHOLD": "700",
+    "ILCLDM_UNET_ROI_CHANNEL": "1",
+    "ILCLDM_USE_TRAIN_LABEL": "1",
+    "ILCLDM_IMAGE_VOLUME_NORM": "minmax",
+    "ILCLDM_MINMAX_STATS_PATH": "data_info/minmax_rois_p05_p995.json",
+    "ILCLDM_KL_LOSS": "1",
+    "ILCLDM_KL_LAMBDA": "1e-1",
+    "ILCLDM_FILM_MODE": "off",
+    "ILCLDM_USE_FILM": "0",
+    "ILCLDM_DIFFUSION_FEATURE_SPACE": "z18k",
+    "ILCLDM_PRED_X0_CLAMP": "4",
+    "ILCLDM_SKIP_CROP": "1",
+    "ILCLDM_WHOLE_MRI": "data_rois/whole_MRI",
+    "ILCLDM_WHOLE_ABETA": "data_rois/whole_Abeta",
+    "ILCLDM_LATENT_ABETA": "data_rois/latent_Abeta_minmax_kl1e1/",
+    "ILCLDM_ROI_VOLUME_SHAPE": "96,112,114",
+    "ILCLDM_REFERENCE_NIFTI": "data_rois/whole_MRI/3102.nii.gz",
+    "ILCLDM_ROI_MASK_PATH": "data_rois/roi_mask_unet.nii.gz"
+  },
   "base_frozen_nhy": {
     "ILCLDM_MRI_ENCODER_MODE": "frozen",
     "ILCLDM_MRI_ENCODER_CHECKPOINT": "result/exp_nm_s1_mri_nhy_v1/phase1_mri/checkpoints/MRI_AAE.pth.tar",
@@ -512,6 +538,65 @@
         "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
         "ILCLDM_LATENT_CALIBRATION": "0",
         "ILCLDM_PRED_X0_CLAMP": "4"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_roiw10": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_roiw10",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_roiw10",
+      "label": "R3: baseline x0 minmax_kl + primary x0 L1 with latent ROI weight ×10",
+      "short_label": "rois_reproc_x0_minmax_kl_roiw10",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl",
+      "prerequisite": "Same E1 SPECT/MRI minmax+KL and data_rois/latent_Abeta_minmax_kl/ as parent; UNet scratch; single delta ILCLDM_DIFFUSION_ROI_WEIGHT=10",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "0",
+        "ILCLDM_PRED_X0_CLAMP": "4",
+        "ILCLDM_DIFFUSION_ROI_WEIGHT": "10",
+        "ILCLDM_BATCH_SIZE": "4"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_ssim": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_ssim",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_ssim",
+      "label": "R4: baseline x0 minmax_kl + (1−SSIM) on decoded SPECT every step (PASTA λ=1.0)",
+      "short_label": "rois_reproc_x0_minmax_kl_ssim",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl",
+      "prerequisite": "Same E1 SPECT/MRI minmax+KL and data_rois/latent_Abeta_minmax_kl/ as parent; UNet scratch; single delta ILCLDM_DIFFUSION_SSIM_LAMBDA=1.0; keep AUX_IMAGE_LOSS",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "0",
+        "ILCLDM_PRED_X0_CLAMP": "4",
+        "ILCLDM_DIFFUSION_SSIM_LAMBDA": "1.0"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl1e1": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl1e1",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl1e1",
+      "label": "R1c: minmax + KL 1e-1 AAE, x0 L1, grad clip, t_max=999, clamp p0.5/p99.5 of train latents",
+      "short_label": "rois_reproc_x0_minmax_kl1e1",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl1e1",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl",
+      "prerequisite": "E1 SPECT/MRI minmax+KL 1e-1; latents data_rois/latent_Abeta_minmax_kl1e1/; UNet scratch; objective x0; clamp LO/HI from train latent percentiles",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "0",
+        "ILCLDM_PRED_X0_CLAMP": "4",
+        "ILCLDM_PRED_X0_CLAMP_LO": "-2.6189742624759673",
+        "ILCLDM_PRED_X0_CLAMP_HI": "1.7349464029073798",
+        "ILCLDM_SAMPLING_T_MAX": "999",
+        "ILCLDM_GRAD_CLIP_NORM": "1.0",
+        "ILCLDM_BATCH_SIZE": "4"
       }
     },
     "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_calib": {

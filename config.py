@@ -14,6 +14,8 @@ validation_interval = int(os.getenv("ILCLDM_VALIDATION_INTERVAL", "5"))
 early_stopping_patience = int(os.getenv("ILCLDM_EARLY_STOPPING_PATIENCE", "10"))
 # Minimum absolute improvement required to reset early-stopping patience.
 EARLY_STOP_MIN_DELTA = float(os.getenv("ILCLDM_EARLY_STOP_MIN_DELTA", "0.0"))
+# Global L2 grad clip after backward, before optimizer.step. 0 = off (baseline).
+GRAD_CLIP_NORM = float(os.getenv("ILCLDM_GRAD_CLIP_NORM", "0"))
 time_dim = 128
 num_classes = 2
 Lambda = 100
@@ -159,6 +161,14 @@ if _env_roi_volume_shape:
 ROI_MASK_PATH = os.getenv("ILCLDM_ROI_MASK_PATH", "data/mask_basal_ganglia_full.nii.gz")
 ROI_WEIGHT_ALPHA = float(os.getenv("ILCLDM_ROI_WEIGHT_ALPHA", "3.0"))
 USE_ROI_LOSS = os.getenv("ILCLDM_USE_ROI_LOSS", "0") == "1"
+
+# Stage-2 R3: weight the primary x0 L1 in latent space. Outside ROI = 1, inside = N.
+# 0 = off (plain L1). Typical ablation value: 10.
+DIFFUSION_ROI_WEIGHT = float(os.getenv("ILCLDM_DIFFUSION_ROI_WEIGHT", "0"))
+
+# Stage-2 R4: λ(1−SSIM) on decoded SPECT vs GT when objective is x0. 0 = off.
+# PASTA adds (1−SSIM) unweighted → λ=1.0. Applied every training step.
+DIFFUSION_SSIM_LAMBDA = float(os.getenv("ILCLDM_DIFFUSION_SSIM_LAMBDA", "0"))
 
 # Stage-2 v2: early stopping on validation latent MSE (else legacy PSNR+SSIM*10)
 EARLY_STOP_LATENT_METRIC = os.getenv("ILCLDM_EARLY_STOP_LATENT_METRIC", "0") == "1"

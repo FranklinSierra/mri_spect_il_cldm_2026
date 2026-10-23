@@ -110,8 +110,10 @@ def latent_metrics(z_hat: torch.Tensor, z_gt: torch.Tensor) -> dict[str, float]:
 
 
 def image_metrics(aae: AAE, spect_gt: torch.Tensor, z_raw: torch.Tensor) -> dict[str, float]:
+    """Image PSNR/SSIM; decoder output is model space (minmax tanh), GT is dataset range."""
     with torch.no_grad():
         pred = aae.decoder(z_raw)
+    # batch_metric_scores applies stored_image_from_model for minmax.
     psnr_v, ssim_v = batch_metric_scores(spect_gt.detach().cpu(), pred.detach().cpu())
     return {"PSNR": float(psnr_v), "SSIM": float(ssim_v)}
 

@@ -29,6 +29,24 @@ def combined_spect_weights(
     return weights
 
 
+def roi_weighted_l1(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    roi_mask: torch.Tensor | None,
+    roi_weight: float,
+) -> torch.Tensor:
+    """Mean L1 with outside weight 1 and ROI weight ``roi_weight``.
+
+    ``roi_mask`` is broadcast to ``prediction`` (e.g. latent 1×1×Dz×Dy×Dx).
+    When ``roi_weight <= 0`` or ``roi_mask`` is None, falls back to plain L1.
+    """
+    err = torch.abs(prediction - target)
+    if roi_mask is None or float(roi_weight) <= 0:
+        return err.mean()
+    w = 1.0 + (float(roi_weight) - 1.0) * roi_mask
+    return (w * err).mean()
+
+
 def weighted_l1_loss(
     target: torch.Tensor,
     prediction: torch.Tensor,

@@ -49,7 +49,6 @@ from dataset import (
     TwoDataset,
     dataset_image_to_model,
     resolve_nifti_path,
-    stored_image_from_model,
 )
 from code.volume_shapes import get_latent_shape, get_volume_shape, get_working_volume_shape
 from losses import (
@@ -434,7 +433,7 @@ def evaluate_reconstruction(model, split, args, out_csv):
                     f"Unexpected MRI reconstruction shape: {tuple(reconstructed.shape)} "
                     f"(expected {expected})"
                 )
-            batch_psnr, batch_ssim = batch_metric_scores(volume, stored_image_from_model(reconstructed))
+            batch_psnr, batch_ssim = batch_metric_scores(volume, reconstructed)
             subject_id = subject_id_from_name(names)
             rows.append({"ID": subject_id, "split": split, "PSNR": batch_psnr, "SSIM": batch_ssim})
             psnr_total += batch_psnr

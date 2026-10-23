@@ -34,28 +34,53 @@ resolve_sibling() {
   local name="$1"
   if [[ -d "$PARENT_DIR/$name/.git" ]]; then
     echo "$PARENT_DIR/$name"
-  else
+  elif [[ -d "$REPO_DIR/$name" ]]; then
     echo "$REPO_DIR/$name"
+  else
+    echo ""
   fi
 }
 COCOLIT_HOST="$(resolve_sibling CoCoLIT)"
 FST_HOST="$(resolve_sibling IL-FST)"
+PASTA_HOST=""
+if [[ -d "$PARENT_DIR/pasta-pd-ref" ]]; then
+  PASTA_HOST="$PARENT_DIR/pasta-pd-ref"
+fi
+
+MOUNT_ARGS=(
+  -v "$REPO_DIR:/workspace/IL-CLDM"
+  -v "$HOST_DATA_DIR:/workspace/IL-CLDM/data"
+)
+if [[ -n "$COCOLIT_HOST" ]]; then
+  MOUNT_ARGS+=(-v "$COCOLIT_HOST:/workspace/CoCoLIT")
+fi
+if [[ -n "$FST_HOST" ]]; then
+  MOUNT_ARGS+=(-v "$FST_HOST:/workspace/IL-FST")
+fi
+if [[ -n "$PASTA_HOST" ]]; then
+  MOUNT_ARGS+=(-v "$PASTA_HOST:/workspace/pasta-pd-ref")
+fi
+
+ENV_ARGS=(
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  -e "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}"
+  -e "ILCLDM_EPOCHS=${ILCLDM_EPOCHS:-1000}"
+  -e "ILCLDM_NOISE_STEPS=${ILCLDM_NOISE_STEPS:-1000}"
+  -e ILCLDM_ROOT=/workspace/IL-CLDM
+)
+# Forward optional ILCLDM_* from .env / environment into the container.
+while IFS= read -r var; do
+  [[ -n "${!var:-}" ]] || continue
+  ENV_ARGS+=(-e "${var}=${!var}")
+done < <(compgen -v ILCLDM_ || true)
 
 docker run -d \
   --name "$CONTAINER_NAME" \
   --gpus all \
   --ipc=host \
   --shm-size=16g \
-  -e CUDA_DEVICE_ORDER=PCI_BUS_ID \
-  -e CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
-  -e ILCLDM_EPOCHS="${ILCLDM_EPOCHS:-1000}" \
-  -e ILCLDM_NOISE_STEPS="${ILCLDM_NOISE_STEPS:-1000}" \
-  -e ILCLDM_ROOT=/workspace/IL-CLDM \
-  -v "$REPO_DIR:/workspace/IL-CLDM" \
-  -v "$COCOLIT_HOST:/workspace/CoCoLIT" \
-  -v "$FST_HOST:/workspace/IL-FST" \
-  -v "$HOST_DATA_DIR:/workspace/IL-CLDM/data" \
-  -v "$PARENT_DIR/pasta-pd-ref:/workspace/pasta-pd-ref" \
+  "${ENV_ARGS[@]}" \
+  "${MOUNT_ARGS[@]}" \
   -w /workspace/IL-CLDM \
   "$IMAGE_NAME" \
   sleep infinity
@@ -63,4 +88,7 @@ docker run -d \
 echo "Started container '$CONTAINER_NAME'."
 echo "Repo: /workspace/IL-CLDM"
 echo "Data mount: $HOST_DATA_DIR -> /workspace/IL-CLDM/data"
+[[ -n "$COCOLIT_HOST" ]] || echo "Note: CoCoLIT mount skipped (not found)."
+[[ -n "$FST_HOST" ]] || echo "Note: IL-FST mount skipped (not found)."
+[[ -n "$PASTA_HOST" ]] || echo "Note: pasta-pd-ref mount skipped (not found)."
 echo "Attach from VS Code Remote Explorer > Dev Containers."

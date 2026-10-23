@@ -127,7 +127,7 @@ def test_roi_metrics_sum_every_volume_in_the_batch():
 
 
 def test_stored_image_is_dataset_range_before_psnr(monkeypatch):
-    from main import batch_metric_scores
+    from main import batch_metric_scores, prepare_prediction_for_metrics
 
     monkeypatch.setattr(config, "IMAGE_VOLUME_NORM", "minmax")
     target = np.zeros((8, 8, 8), dtype=np.float32)
@@ -135,8 +135,15 @@ def test_stored_image_is_dataset_range_before_psnr(monkeypatch):
     pred_model = target * 2.0 - 1.0
     restored = stored_image_from_model(pred_model)
     np.testing.assert_allclose(np.asarray(restored), target, atol=1e-6)
-    psnr_bad, _ssim_bad = batch_metric_scores(target, pred_model)
-    assert psnr_bad < 10
+    # Public metric API must restore model-space preds (not compare [-1,1] to [0,1]).
+    np.testing.assert_allclose(prepare_prediction_for_metrics(pred_model), target, atol=1e-6)
+    psnr_ok, ssim_ok = batch_metric_scores(target, pred_model)
+    assert psnr_ok > 30
+    assert ssim_ok > 0.9
+    # Double-restore would squash contrast and collapse PSNR — callers must not
+    # pre-apply stored_image_from_model before batch_metric_scores.
+    psnr_double, _ = batch_metric_scores(target, restored)
+    assert psnr_double < psnr_ok
 
 
 def test_x0_minmax_kl_registry_points_at_x0_parent():
@@ -155,3 +162,51 @@ def test_x0_minmax_kl_registry_points_at_x0_parent():
     assert env["ILCLDM_FILM_MODE"] == "off"
     assert "minmax_kl" in env["ILCLDM_AAE_CHECKPOINT"]
     assert "minmax_kl" in env["ILCLDM_MRI_ENCODER_CHECKPOINT"]
+
+
+def test_x0_minmax_kl_roiw10_r3_registry():
+    registry = load_registry()
+    entry, env = resolve_env(registry, "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_roiw10")
+    assert entry["parent"] == "calib_roi3ch_uni_rois_reproc_x0_minmax_kl"
+    assert entry["base"] == "base_calib_roi3ch_uni_rois_reproc_minmax_kl"
+    assert entry["short_label"] == "rois_reproc_x0_minmax_kl_roiw10"
+    assert env["ILCLDM_DIFFUSION_OBJECTIVE"] == "x0"
+    assert env["ILCLDM_DIFFUSION_ROI_WEIGHT"] == "10"
+    assert env["ILCLDM_LATENT_ABETA"] == "data_rois/latent_Abeta_minmax_kl/"
+    assert "minmax_kl" in env["ILCLDM_AAE_CHECKPOINT"]
+    assert "kl1e1" not in env["ILCLDM_AAE_CHECKPOINT"]
+    assert "minmax_kl" in env["ILCLDM_MRI_ENCODER_CHECKPOINT"]
+    assert "kl1e1" not in env["ILCLDM_MRI_ENCODER_CHECKPOINT"]
+
+
+def test_x0_minmax_kl_ssim_r4_registry():
+    registry = load_registry()
+    entry, env = resolve_env(registry, "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_ssim")
+    assert entry["parent"] == "calib_roi3ch_uni_rois_reproc_x0_minmax_kl"
+    assert entry["base"] == "base_calib_roi3ch_uni_rois_reproc_minmax_kl"
+    assert entry["short_label"] == "rois_reproc_x0_minmax_kl_ssim"
+    assert env["ILCLDM_DIFFUSION_OBJECTIVE"] == "x0"
+    assert env["ILCLDM_DIFFUSION_SSIM_LAMBDA"] == "1.0"
+    assert "ILCLDM_DIFFUSION_ROI_WEIGHT" not in env or env.get("ILCLDM_DIFFUSION_ROI_WEIGHT", "0") == "0"
+    assert env["ILCLDM_LATENT_ABETA"] == "data_rois/latent_Abeta_minmax_kl/"
+    assert "minmax_kl" in env["ILCLDM_AAE_CHECKPOINT"]
+    assert "kl1e1" not in env["ILCLDM_AAE_CHECKPOINT"]
+    assert "minmax_kl" in env["ILCLDM_MRI_ENCODER_CHECKPOINT"]
+    assert "kl1e1" not in env["ILCLDM_MRI_ENCODER_CHECKPOINT"]
+
+
+def test_x0_minmax_kl1e1_r1c_registry():
+    registry = load_registry()
+    entry, env = resolve_env(registry, "calib_roi3ch_uni_rois_reproc_x0_minmax_kl1e1")
+    assert entry["parent"] == "calib_roi3ch_uni_rois_reproc_x0_minmax_kl"
+    assert entry["base"] == "base_calib_roi3ch_uni_rois_reproc_minmax_kl1e1"
+    assert entry["short_label"] == "rois_reproc_x0_minmax_kl1e1"
+    assert env["ILCLDM_DIFFUSION_OBJECTIVE"] == "x0"
+    assert env["ILCLDM_KL_LAMBDA"] == "1e-1"
+    assert env["ILCLDM_LATENT_ABETA"] == "data_rois/latent_Abeta_minmax_kl1e1/"
+    assert env["ILCLDM_SAMPLING_T_MAX"] == "999"
+    assert env["ILCLDM_GRAD_CLIP_NORM"] == "1.0"
+    assert env["ILCLDM_PRED_X0_CLAMP_LO"] == "-2.6189742624759673"
+    assert env["ILCLDM_PRED_X0_CLAMP_HI"] == "1.7349464029073798"
+    assert "minmax_kl1e1" in env["ILCLDM_AAE_CHECKPOINT"]
+    assert "minmax_kl1e1" in env["ILCLDM_MRI_ENCODER_CHECKPOINT"]

@@ -34,7 +34,7 @@ from tqdm import tqdm
 import umap
 
 import config
-from dataset import stored_image_from_model
+from dataset import dataset_image_to_model, stored_image_from_model
 from code.roi_mask_utils import try_load_roi_mask_numpy
 from code.volume_shapes import (
     clear_shape_cache,
@@ -145,6 +145,7 @@ def default_phase1_mri_encoder_checkpoint():
 
 
 def resolve_mri_encoder_checkpoint(exp, mode, explicit_checkpoint):
+    """Resolve MRI encoder weights: CLI → env → config (manifest) → finetune local → default."""
     if mode == "raw":
         return None
     if explicit_checkpoint:
@@ -152,6 +153,10 @@ def resolve_mri_encoder_checkpoint(exp, mode, explicit_checkpoint):
     env_path = os.getenv("ILCLDM_MRI_ENCODER_CHECKPOINT")
     if env_path:
         return Path(env_path)
+    # apply_manifest_to_config sets this from run_manifest; same pattern as SPECT AAE.
+    cfg_path = getattr(config, "MRI_ENCODER_CHECKPOINT", None)
+    if cfg_path:
+        return Path(cfg_path)
     exp_dir = Path("result") / exp.rstrip("/")
     if mode == "finetune":
         finetuned = exp_dir / "MRI_Encoder_finetuned.pth.tar"
@@ -973,6 +978,7 @@ def sample_latents(diffusion, unet, mri_encoder, MRI, sampling_steps, eta):
 
 
 def subject_reconstruction_metrics(target_np, pred_np, roi_mask_np=None):
+    """PSNR/SSIM; ``pred_np`` must be decoder/model space (minmax: tanh [-1, 1])."""
     psnr_value, ssim_value = batch_metric_scores(target_np, pred_np)
     metrics = {"PSNR": psnr_value, "SSIM": ssim_value}
     if roi_mask_np is not None:
@@ -1031,14 +1037,22 @@ def generate_representations(args, split, aae, unet, mri_encoder, diffusion, out
                         aae,
                         torch.as_tensor(latent_np, device=device).unsqueeze(0),
                     )
+                    pred_model = synthetic_spect_i[0].detach().cpu()
                     synthetic_np = stored_image_from_model(
                         synthetic_spect_i[0, 0].detach().cpu().numpy()
                     )
+                else:
+                    # NIfTI on disk is dataset range; metrics expect model space.
+                    pred_model = dataset_image_to_model(
+                        torch.as_tensor(
+                            np.expand_dims(synthetic_np, axis=(0, 1)),
+                            dtype=torch.float32,
+                        )
+                    )
                 target_np = Abeta[i].detach().cpu()
-                pred_np = torch.as_tensor(
-                    np.expand_dims(synthetic_np, axis=(0, 1)), dtype=torch.float32
+                metric_entry = subject_reconstruction_metrics(
+                    target_np, pred_model, roi_mask_np
                 )
-                metric_entry = subject_reconstruction_metrics(target_np, pred_np, roi_mask_np)
                 rows.append({
                     "ID": subject_id,
                     "split": split,
@@ -1077,9 +1091,10 @@ def generate_representations(args, split, aae, unet, mri_encoder, diffusion, out
                 })
                 continue
 
+            # Disk/export uses dataset range; PSNR/SSIM use raw decoder (model) space.
             synthetic_np = stored_image_from_model(synthetic_spect[i, 0].detach().cpu().numpy())
             target_np = Abeta[i].detach().cpu()
-            pred_np = stored_image_from_model(synthetic_spect[i].detach().cpu())
+            pred_model = synthetic_spect[i].detach().cpu()
 
             rep_path = save_subject_representation(
                 out_dir,
@@ -1093,7 +1108,7 @@ def generate_representations(args, split, aae, unet, mri_encoder, diffusion, out
             if args.save_synthetic_spect:
                 spect_path = str(save_synthetic_nifti(out_dir, split, subject_id, synthetic_np))
 
-            metric_entry = subject_reconstruction_metrics(target_np, pred_np, roi_mask_np)
+            metric_entry = subject_reconstruction_metrics(target_np, pred_model, roi_mask_np)
             rows.append({
                 "ID": subject_id,
                 "split": split,

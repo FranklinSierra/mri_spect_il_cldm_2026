@@ -10,7 +10,11 @@ sys.path.insert(0, str(ROOT))
 
 import config
 from code.volume_shapes import clear_shape_cache, get_latent_shape
-from inference import apply_manifest_to_config, resolve_unet_build_config
+from inference import (
+    apply_manifest_to_config,
+    resolve_mri_encoder_checkpoint,
+    resolve_unet_build_config,
+)
 
 
 @pytest.fixture
@@ -48,3 +52,23 @@ def test_apply_manifest_roi_latent_shape(legacy_config):
         )
         assert use_roi is True
         assert in_ch == 3
+
+
+def test_resolve_mri_encoder_uses_manifest_config(monkeypatch):
+    """MRI path must follow run_manifest, not the hardcoded exp_nm_s1_mri default."""
+    exp = "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_roiw10"
+    manifest_path = ROOT / "result" / exp / "run_manifest.json"
+    if not manifest_path.is_file():
+        pytest.skip(f"missing {manifest_path}")
+
+    monkeypatch.delenv("ILCLDM_MRI_ENCODER_CHECKPOINT", raising=False)
+    saved = getattr(config, "MRI_ENCODER_CHECKPOINT", None)
+    try:
+        manifest = apply_manifest_to_config(exp)
+        assert manifest is not None
+        expected = "result/exp_nm_s1_mri_rois_reproc_minmax_kl/phase1_mri/checkpoints/MRI_AAE.pth.tar"
+        assert config.MRI_ENCODER_CHECKPOINT == expected
+        resolved = resolve_mri_encoder_checkpoint(exp, "frozen", explicit_checkpoint=None)
+        assert resolved == Path(expected)
+    finally:
+        config.MRI_ENCODER_CHECKPOINT = saved

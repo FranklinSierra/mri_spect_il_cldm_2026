@@ -1102,6 +1102,31 @@ Métrica guía A/B: **AUC / balanced accuracy del latente DDIM**, no PSNR.
 
 ---
 
+## Ablaciones PASTA sobre `x0_minmax_kl` (R3 / R4)
+
+Baseline ganador: `calib_roi3ch_uni_rois_reproc_x0_minmax_kl`. Un solo delta por clave. **No** hay pipeline que lance todos los R.
+
+| Bloque | Clave registry | Delta | Doc |
+|--------|----------------|-------|-----|
+| R3 | `calib_roi3ch_uni_rois_reproc_x0_minmax_kl_roiw10` | `DIFFUSION_ROI_WEIGHT=10` | plan-ablation |
+| R4 | `calib_roi3ch_uni_rois_reproc_x0_minmax_kl_ssim` | `DIFFUSION_SSIM_LAMBDA=1.0` (SSIM imagen cada step) | [plan-r4-ssim-image-loss.md](docs/plan-r4-ssim-image-loss.md) |
+
+```bash
+# R4 — SSIM en SPECT decodificado (λ=1.0 PASTA); mantiene AUX_IMAGE_LOSS
+python3 scripts/run_ablation.py calib_roi3ch_uni_rois_reproc_x0_minmax_kl_ssim --gpu <N>
+
+python3 inference.py \
+  --exp exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_ssim \
+  --run-id calib_roi3ch_uni_rois_reproc_x0_minmax_kl_ssim \
+  --mri-encoder-mode frozen \
+  --mri-encoder-checkpoint result/exp_nm_s1_mri_rois_reproc_minmax_kl/phase1_mri/checkpoints/MRI_AAE.pth.tar \
+  --save-synthetic-spect --splits train test
+```
+
+R2 (cosine) queda pendiente. Tras congelar el stack de difusión: R5 MRI cond → R6 label dropout.
+
+---
+
 ## Referencia de modos (`scripts/run_experiment.sh`)
 
 | Comando | Descripción |

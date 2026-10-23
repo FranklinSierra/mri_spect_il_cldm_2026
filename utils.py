@@ -18,6 +18,27 @@ def weights_init(m):
         nn.init.normal_(m.weight.data, 1.0, 0.02)
         nn.init.constant_(m.bias.data, 0)
 
+
+def maybe_clip_grad_norm(parameters, max_norm=None):
+    """Clip grads if GRAD_CLIP_NORM (or max_norm) is > 0. Returns total norm or None."""
+    norm = config.GRAD_CLIP_NORM if max_norm is None else max_norm
+    if norm is None or float(norm) <= 0:
+        return None
+    params = [p for p in parameters if p is not None and getattr(p, "requires_grad", False)]
+    if not params:
+        return None
+    return torch.nn.utils.clip_grad_norm_(params, float(norm))
+
+
+def optimizer_trainable_params(optimizer):
+    """Flatten requires_grad params from an optimizer's param_groups."""
+    return [
+        p
+        for group in optimizer.param_groups
+        for p in group["params"]
+        if p is not None and p.requires_grad
+    ]
+
 def save_checkpoint(model, optimizer, filename="my_checkpoint.pth.tar"):
     print("=> Saving checkpoint")
     checkpoint = {
@@ -230,6 +251,8 @@ RUN_MANIFEST_CONFIG_KEYS = (
     "USE_ROI_LOSS",
     "ROI_MASK_PATH",
     "ROI_WEIGHT_ALPHA",
+    "DIFFUSION_ROI_WEIGHT",
+    "DIFFUSION_SSIM_LAMBDA",
     "EARLY_STOP_LATENT_METRIC",
     "USE_TRAIN_LABEL",
     "DIFFUSION_FEATURE_SPACE",
@@ -248,6 +271,7 @@ RUN_MANIFEST_CONFIG_KEYS = (
     "CLS_LOSS_LAMBDA",
     "EARLY_STOP_CLS_METRIC",
     "EARLY_STOP_MIN_DELTA",
+    "GRAD_CLIP_NORM",
     "PRED_X0_CLAMP",
     "PRED_X0_CLAMP_LO",
     "PRED_X0_CLAMP_HI",

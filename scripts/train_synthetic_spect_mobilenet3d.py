@@ -3,6 +3,9 @@
 
 Holds out a stratified fraction of the synthetic train subjects for validation.
 Reports classification on the synthetic test subjects. One CE per volume.
+
+Optional --z-min/--z-max crops the axial axis to a 2.5D subvolume.
+Optional --init-checkpoint loads a SPECT-pretrained 3D/2.5D MobileNet for full finetune.
 """
 
 from __future__ import annotations
@@ -59,6 +62,14 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--no-pretrained", action="store_true")
+    p.add_argument("--z-min", type=int, default=None)
+    p.add_argument("--z-max", type=int, default=None)
+    p.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional SPECT 3D/2.5D MobileNet checkpoint for full finetune.",
+    )
     return p.parse_args()
 
 
@@ -80,7 +91,6 @@ def subject_id_from_path(path: Path) -> str:
 
 def list_volumes(root: Path) -> list[Path]:
     files = sorted(root.glob("*.nii.gz")) + sorted(root.glob("*.nii"))
-    # Avoid double-counting if both suffixes exist for the same stem.
     seen = set()
     unique = []
     for path in files:
@@ -94,9 +104,23 @@ def list_volumes(root: Path) -> list[Path]:
     return unique
 
 
+def crop_axial(vol: np.ndarray, z_min: int | None, z_max: int | None) -> np.ndarray:
+    if z_min is None and z_max is None:
+        return vol
+    if z_min is None or z_max is None:
+        raise ValueError("Both --z-min and --z-max must be set together")
+    if z_min > z_max:
+        raise ValueError(f"--z-min ({z_min}) > --z-max ({z_max})")
+    z_lo = max(int(z_min), 0)
+    z_hi = min(int(z_max), vol.shape[2] - 1)
+    return vol[:, :, z_lo : z_hi + 1]
+
+
 class NiftiVolumeDataset(Dataset):
-    def __init__(self, records: list[dict]):
+    def __init__(self, records: list[dict], z_min: int | None, z_max: int | None):
         self.records = records
+        self.z_min = z_min
+        self.z_max = z_max
 
     def __len__(self) -> int:
         return len(self.records)
@@ -104,6 +128,7 @@ class NiftiVolumeDataset(Dataset):
     def __getitem__(self, idx: int):
         rec = self.records[idx]
         vol = nib.load(rec["path"]).get_fdata().astype(np.float32)
+        vol = crop_axial(vol, self.z_min, self.z_max)
         x = torch.from_numpy(np.ascontiguousarray(vol)).unsqueeze(0)
         return x, int(rec["label"]), rec["ID"]
 
@@ -158,10 +183,18 @@ def records_from_dir(root: Path, labels: dict[str, int]) -> list[dict]:
     return rows
 
 
+def load_model_weights(model: nn.Module, checkpoint: Path) -> None:
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    state = ckpt.get("model_state_dict", ckpt)
+    model.load_state_dict(state, strict=True)
+
+
 def main():
     args = parse_args()
     if not 0.0 < args.val_fraction < 1.0:
         raise SystemExit(f"ERROR: --val-fraction must be in (0, 1), got {args.val_fraction}")
+    if (args.z_min is None) ^ (args.z_max is None):
+        raise SystemExit("ERROR: --z-min and --z-max must be provided together")
     set_seed(args.seed)
 
     out_dir = Path(args.out_dir)
@@ -186,16 +219,27 @@ def main():
     fit_recs = [by_id[sid] for sid in fit_ids]
     val_recs = [by_id[sid] for sid in val_ids]
 
+    split_table = pd.DataFrame(
+        [{"ID": r["ID"], "label": r["label"], "clf_split": "train"} for r in fit_recs]
+        + [{"ID": r["ID"], "label": r["label"], "clf_split": "val"} for r in val_recs]
+        + [{"ID": r["ID"], "label": r["label"], "clf_split": "test"} for r in test_recs]
+    )
+    split_table.to_csv(out_dir / "split_used.csv", index=False)
+
     print(
         f"device={device} train_pool={len(train_pool)} fit={len(fit_recs)} "
         f"val={len(val_recs)} test={len(test_recs)} batch_size={args.batch_size}"
     )
-    sample = nib.load(fit_recs[0]["path"]).get_fdata()
-    print(f"volume_shape={tuple(sample.shape)} stored_range=[{float(sample.min()):.4f}, {float(sample.max()):.4f}]")
+    sample_full = nib.load(fit_recs[0]["path"]).get_fdata().astype(np.float32)
+    sample = crop_axial(sample_full, args.z_min, args.z_max)
+    print(
+        f"volume_shape={tuple(sample.shape)} "
+        f"stored_range=[{float(sample.min()):.4f}, {float(sample.max()):.4f}]"
+    )
 
     def make_loader(recs: list[dict], shuffle: bool) -> DataLoader:
         return DataLoader(
-            NiftiVolumeDataset(recs),
+            NiftiVolumeDataset(recs, args.z_min, args.z_max),
             batch_size=args.batch_size,
             shuffle=shuffle,
             num_workers=args.num_workers,
@@ -207,11 +251,37 @@ def main():
     val_loader = make_loader(val_recs, shuffle=False)
     test_loader = make_loader(test_recs, shuffle=False)
 
+    init_ckpt = Path(args.init_checkpoint) if args.init_checkpoint else None
+    if init_ckpt is not None and not init_ckpt.is_file():
+        raise FileNotFoundError(f"Missing --init-checkpoint: {init_ckpt}")
+
+    use_25d = args.z_min is not None
+    if init_ckpt is not None:
+        finetune_mode = "full"
+        pretrained = False
+        model_name = (
+            "mobilenet_v2_3d_full_finetune_from_spect_2.5D"
+            if use_25d
+            else "mobilenet_v2_3d_full_finetune_from_spect"
+        )
+    else:
+        finetune_mode = "from_imagenet"
+        pretrained = not args.no_pretrained
+        model_name = (
+            "mobilenet_v2_3d_imagenet_inflated_2.5D"
+            if use_25d
+            else "mobilenet_v2_3d_imagenet_inflated"
+        )
+
     model = build_mobilenet_v2_3d(
         num_classes=2,
         in_channels=1,
-        pretrained=not args.no_pretrained,
+        pretrained=pretrained,
     ).to(device)
+    if init_ckpt is not None:
+        load_model_weights(model, init_ckpt)
+        print(f"Loaded init checkpoint: {init_ckpt}")
+
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -225,6 +295,9 @@ def main():
         "train_dir": str(args.train_dir),
         "test_dir": str(args.test_dir),
         "out_dir": str(out_dir),
+        "meta_csv": str(args.meta_csv),
+        "init_checkpoint": str(init_ckpt) if init_ckpt is not None else None,
+        "finetune_mode": finetune_mode,
         "val_fraction": args.val_fraction,
         "val_split": "stratified holdout from synthetic train",
         "epochs": args.epochs,
@@ -233,11 +306,11 @@ def main():
         "weight_decay": args.weight_decay,
         "patience": args.patience,
         "seed": args.seed,
-        "pretrained": not args.no_pretrained,
+        "pretrained": pretrained,
         "volume_norm": "as stored in synthetic NIfTI (minmax restored to [0, 1])",
         "volume_shape": list(sample.shape),
         "early_stop_metric": "val_balanced_accuracy",
-        "model": "mobilenet_v2_3d_inflated",
+        "model": model_name,
         "n_train_pool": len(train_pool),
         "n_fit": len(fit_recs),
         "n_val": len(val_recs),
@@ -246,6 +319,15 @@ def main():
         "val_ids": sorted(val_ids),
         "test_ids": sorted(r["ID"] for r in test_recs),
     }
+    if use_25d:
+        config_payload.update(
+            {
+                "z_min": args.z_min,
+                "z_max": args.z_max,
+                "z_range_inclusive": True,
+                "mode": "2.5D_axial_subvolume",
+            }
+        )
     (out_dir / "config.json").write_text(json.dumps(config_payload, indent=2))
 
     for epoch in range(1, args.epochs + 1):
@@ -295,7 +377,9 @@ def main():
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "best_val_balanced_accuracy": best_val_ba,
-                    "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+                    "args": {
+                        k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()
+                    },
                 },
                 best_path,
             )
@@ -328,6 +412,32 @@ def main():
     metrics_test = {"best_epoch": best_epoch, **test_metrics}
     (out_dir / "metrics_valid.json").write_text(json.dumps(metrics_valid, indent=2))
     (out_dir / "metrics_test.json").write_text(json.dumps(metrics_test, indent=2))
+
+    summary = {
+        "device": str(device),
+        "best_epoch": best_epoch,
+        "best_val_balanced_accuracy": best_val_ba,
+        "test_metrics": test_metrics,
+        "val_metrics": val_metrics,
+        "n_train_subjects": len(fit_recs),
+        "n_val_subjects": len(val_recs),
+        "n_test_subjects": len(test_recs),
+        "model": model_name,
+        "init_checkpoint": str(init_ckpt) if init_ckpt is not None else None,
+        "finetune_mode": finetune_mode,
+        "early_stop_metric": "val_balanced_accuracy",
+        "loss": "CrossEntropyLoss(logits) + Softmax for probs",
+        "checkpoint": str(best_path),
+    }
+    if use_25d:
+        summary.update(
+            {
+                "z_min": args.z_min,
+                "z_max": args.z_max,
+                "mode": "2.5D_axial_subvolume",
+            }
+        )
+    (out_dir / "run_summary.json").write_text(json.dumps(summary, indent=2))
 
     print("\n=== VAL ===")
     print(json.dumps(metrics_valid, indent=2))
