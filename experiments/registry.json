@@ -577,6 +577,126 @@
         "ILCLDM_DIFFUSION_SSIM_LAMBDA": "1.0"
       }
     },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine",
+      "label": "R2: baseline x0 minmax_kl + CosineAnnealingLR (classification baseline)",
+      "short_label": "rois_reproc_x0_minmax_kl_cosine",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl",
+      "prerequisite": "Same E1 SPECT/MRI minmax+KL and data_rois/latent_Abeta_minmax_kl/ as parent; UNet scratch; single delta ILCLDM_LR_SCHEDULER=cosine",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "0",
+        "ILCLDM_PRED_X0_CLAMP": "4",
+        "ILCLDM_LR_SCHEDULER": "cosine",
+        "ILCLDM_BATCH_SIZE": "8"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_ft": {
+      "exp": "exp_nm_s2_finetune_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_ft",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_ft",
+      "label": "cosine baseline + MRI encoder finetune (single delta)",
+      "short_label": "rois_reproc_x0_minmax_kl_cosine_ft",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine",
+      "prerequisite": "Parent cosine checkpoint optional for compare only; UNet scratch; MRI starts from E1 then trains; SPECT AAE frozen",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "0",
+        "ILCLDM_PRED_X0_CLAMP": "4",
+        "ILCLDM_LR_SCHEDULER": "cosine",
+        "ILCLDM_BATCH_SIZE": "2",
+        "ILCLDM_MRI_ENCODER_MODE": "finetune"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_film_ms": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_film_ms",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_film_ms",
+      "label": "cosine baseline + spatial FiLM h64 in all UNet ResnetBlocks (single delta)",
+      "short_label": "rois_reproc_x0_minmax_kl_cosine_film_ms",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine",
+      "prerequisite": "Same E1/latentes as cosine parent; UNet scratch; single delta ILCLDM_FILM_MODE=spatial_ms",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "0",
+        "ILCLDM_PRED_X0_CLAMP": "4",
+        "ILCLDM_LR_SCHEDULER": "cosine",
+        "ILCLDM_BATCH_SIZE": "2",
+        "ILCLDM_FILM_MODE": "spatial_ms",
+        "ILCLDM_USE_FILM": "0"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_attn3": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_attn3",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_attn3",
+      "label": "cosine baseline + UNet self-attn at latent res 3 (ROI 24-grid; single delta)",
+      "short_label": "rois_reproc_x0_minmax_kl_cosine_attn3",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine",
+      "prerequisite": "Same E1/latentes as cosine parent; UNet scratch; single delta ILCLDM_ATTN_RES=3",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "0",
+        "ILCLDM_PRED_X0_CLAMP": "4",
+        "ILCLDM_LR_SCHEDULER": "cosine",
+        "ILCLDM_BATCH_SIZE": "2",
+        "ILCLDM_ATTN_RES": "3"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_label_drop": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_label_drop",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_label_drop",
+      "label": "cosine baseline + label dropout 0.15 / null token (single delta)",
+      "short_label": "rois_reproc_x0_minmax_kl_cosine_label_drop",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine",
+      "prerequisite": "Same E1/latentes as cosine parent; UNet scratch; single delta ILCLDM_LABEL_DROPOUT_PROB=0.15",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "0",
+        "ILCLDM_PRED_X0_CLAMP": "4",
+        "ILCLDM_LR_SCHEDULER": "cosine",
+        "ILCLDM_BATCH_SIZE": "2",
+        "ILCLDM_LABEL_DROPOUT_PROB": "0.15"
+      }
+    },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_structure": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_structure",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_structure",
+      "label": "cosine baseline + CycleGAN eq.5 structure loss 1−SSIM on decoded SPECT (single delta)",
+      "short_label": "rois_reproc_x0_minmax_kl_cosine_structure",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine",
+      "prerequisite": "Same E1/latentes as cosine parent; UNet scratch; single delta ILCLDM_STRUCTURE_LOSS_LAMBDA=1.0 (not stacked with DIFFUSION_SSIM)",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "0",
+        "ILCLDM_PRED_X0_CLAMP": "4",
+        "ILCLDM_LR_SCHEDULER": "cosine",
+        "ILCLDM_BATCH_SIZE": "2",
+        "ILCLDM_STRUCTURE_LOSS_LAMBDA": "1.0"
+      }
+    },
     "calib_roi3ch_uni_rois_reproc_x0_minmax_kl1e1": {
       "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl1e1",
       "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl1e1",

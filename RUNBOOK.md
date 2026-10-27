@@ -1123,7 +1123,43 @@ python3 inference.py \
   --save-synthetic-spect --splits train test
 ```
 
-R2 (cosine) queda pendiente. Tras congelar el stack de difusión: R5 MRI cond → R6 label dropout.
+R2 (`calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine`) es la **línea base de clasificación** actual. Ver sección siguiente para ablaciones independientes sobre cosine.
+
+---
+
+## Ablaciones independientes sobre `minmax_kl_cosine`
+
+**Padre científico:** `calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine` (`ILCLDM_LR_SCHEDULER=cosine`).  
+**`base` (paths/datos):** `base_calib_roi3ch_uni_rois_reproc_minmax_kl` — no es un competidor de métricas.  
+Cinco hermanos, UNet scratch, **un solo delta** cada uno. Sin R5b (recon brazo MRI). Structure = CycleGAN eq. 5 \(L_{\mathrm{structure}}=1-\mathrm{SSIM}\) vía `STRUCTURE_LOSS_LAMBDA` (no apilar con `DIFFUSION_SSIM_LAMBDA`). Atención ROI: latente 24³ → `ATTN_RES=3` (no `5`).
+
+| Clave | Delta |
+|-------|-------|
+| `…_cosine_ft` | `MRI_ENCODER_MODE=finetune` |
+| `…_cosine_film_ms` | `FILM_MODE=spatial_ms` |
+| `…_cosine_attn3` | `ATTN_RES=3` |
+| `…_cosine_label_drop` | `LABEL_DROPOUT_PROB=0.15` |
+| `…_cosine_structure` | `STRUCTURE_LOSS_LAMBDA=1.0` |
+
+```bash
+# Una clave (ejemplo)
+python3 scripts/run_ablation.py calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_ft --gpu <N>
+
+# Secuencial las 5 (sustituir N; no lanzar hasta pedirlo)
+setsid nohup bash -c '
+  for k in \
+    calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_ft \
+    calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_film_ms \
+    calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_attn3 \
+    calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_label_drop \
+    calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_structure
+  do
+    python3 scripts/run_ablation.py "$k" --gpu N || exit 1
+  done
+' > logs/ablate_cosine5_gpuN.log 2>&1 < /dev/null &
+```
+
+Inferencia finetune: usar `MRI_Encoder_finetuned.pth.tar` del `result/<exp>/` correspondiente y `--mri-encoder-mode finetune`. Para film_ms exportar `ILCLDM_FILM_MODE=spatial_ms` si el manifest no restaura el modo.
 
 ---
 

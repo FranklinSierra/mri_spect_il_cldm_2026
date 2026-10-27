@@ -808,6 +808,12 @@ def train_LDM():
             {"params": [p for p in cls_head.parameters() if p.requires_grad], "lr": config.learning_rate}
         )
     opt_Unet = optim.AdamW(optimizer_groups)
+    lr_scheduler = None
+    if getattr(config, "LR_SCHEDULER", "none") == "cosine":
+        lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            opt_Unet, T_max=max(1, int(config.epochs))
+        )
+        print(f"LR scheduler: CosineAnnealingLR(T_max={config.epochs})")
     use_data_parallel = config.device == "cuda" and torch.cuda.is_available() and len(gpus) > 1
     if use_data_parallel:
         Unet = nn.DataParallel(Unet,device_ids=gpus,output_device=gpus[0])
@@ -880,15 +886,26 @@ def train_LDM():
     use_latent_loss = config.LATENT_LOSS
     predicts_x0 = diffusion.predicts_x0()
     diffusion_ssim_lambda = float(getattr(config, "DIFFUSION_SSIM_LAMBDA", 0.0) or 0.0)
-    use_ssim_loss = diffusion_ssim_lambda > 0
+    structure_loss_lambda = float(getattr(config, "STRUCTURE_LOSS_LAMBDA", 0.0) or 0.0)
+    # Prefer CycleGAN structure loss when both are set (no double count of 1−SSIM).
+    if structure_loss_lambda > 0 and diffusion_ssim_lambda > 0:
+        print(
+            f"Warning: STRUCTURE_LOSS_LAMBDA={structure_loss_lambda} and "
+            f"DIFFUSION_SSIM_LAMBDA={diffusion_ssim_lambda} both >0; "
+            "using structure loss only (no double count)."
+        )
+        diffusion_ssim_lambda = 0.0
+    image_ssim_lambda = structure_loss_lambda if structure_loss_lambda > 0 else diffusion_ssim_lambda
+    use_ssim_loss = image_ssim_lambda > 0
+    ssim_loss_name = "structure_loss" if structure_loss_lambda > 0 else "ssim_loss"
     if use_ssim_loss and not predicts_x0:
         print(
-            f"Warning: DIFFUSION_SSIM_LAMBDA={diffusion_ssim_lambda} requires "
-            "objective x0; SSIM image loss disabled for this run."
+            f"Warning: {ssim_loss_name} λ={image_ssim_lambda} requires "
+            "objective x0; image SSIM loss disabled for this run."
         )
         use_ssim_loss = False
     elif use_ssim_loss:
-        print(f"Diffusion image SSIM loss λ={diffusion_ssim_lambda} (every step)")
+        print(f"Diffusion image {ssim_loss_name} λ={image_ssim_lambda} (every step)")
     need_spect_volume = use_aux_image or use_ssim_loss
     global_step = 0
     roi_mask_tensor = try_load_roi_mask_tensor(config.device)
@@ -913,7 +930,7 @@ def train_LDM():
             if use_aux_image:
                 header.append("aux_image_loss")
             if use_ssim_loss:
-                header.append("ssim_loss")
+                header.append(ssim_loss_name)
             if use_constant_latent_l1(use_latent_loss, objective=config.DIFFUSION_OBJECTIVE):
                 header.append("latent_loss")
             if use_cls_loss:
@@ -1048,7 +1065,7 @@ def train_LDM():
 
             if use_ssim_loss and spect_pred is not None and spect_gt is not None:
                 ssim_term = ssim_loss_3d(spect_pred, spect_gt, data_range=2.0)
-                loss = loss + diffusion_ssim_lambda * ssim_term
+                loss = loss + image_ssim_lambda * ssim_term
                 ssim_loss_epoch += ssim_term.detach()
                 ssim_steps += 1
 
@@ -1090,8 +1107,11 @@ def train_LDM():
                 log["train/aux_image_loss"] = row[col]
                 col += 1
             if use_ssim_loss:
-                log["train/ssim_loss"] = row[col]
+                log[f"train/{ssim_loss_name}"] = row[col]
             wandb_run.log(log, step=epoch + 1)
+
+        if lr_scheduler is not None:
+            lr_scheduler.step()
 
         if not should_validate(epoch):
             continue

@@ -92,14 +92,17 @@ Crear (sin ejecutar):
 
 - Base `base_…_minmax_kl1e1` + exps fase1 documentados: `exp_nm_s1_spect_rois_reproc_minmax_kl1e1`, `exp_nm_s1_mri_rois_reproc_minmax_kl1e1`
 - `calib_roi3ch_uni_rois_reproc_x0_minmax_kl1e1` — R1c: x0 + clip + t_max=999 + clamp LO/HI (placeholders o path a stats tras encode)
-- `…_minmax_kl1e1_cosine` — R2
-- `…_minmax_kl_roiw10` — R3 (**parent = baseline `…_x0_minmax_kl`** tras fallar R1c; un solo delta `DIFFUSION_ROI_WEIGHT=10`; hermanos R2/R4 igual sobre el baseline ganador)
-- `…_minmax_kl_ssim` — R4 (**parent = baseline `…_x0_minmax_kl`**; `DIFFUSION_SSIM_LAMBDA=1.0` PASTA; doc operativo: [plan-r4-ssim-image-loss.md](plan-r4-ssim-image-loss.md))
-- R5a/b/c o paquete MRI: finetune / recon / `spatial_ms` (plantilla `film_ms_ft`)
-- R6: `LABEL_DROPOUT_PROB=0.15`
-- R7: `…_minmax_kl1e1_structure` — parent R6 (`…_label_drop`); único override `ILCLDM_STRUCTURE_LOSS_LAMBDA=1.0` (**no apilar** con R4 si ambos son `(1−SSIM)` en SPECT)
+- `…_minmax_kl_cosine` — R2 (**línea base de clasificación** actual; `LR_SCHEDULER=cosine`)
+- `…_minmax_kl_roiw10` — R3 (**parent = `…_x0_minmax_kl`**; un solo delta `DIFFUSION_ROI_WEIGHT=10`)
+- `…_minmax_kl_ssim` — R4 (**parent = `…_x0_minmax_kl`**; `DIFFUSION_SSIM_LAMBDA=1.0` PASTA; doc: [plan-r4-ssim-image-loss.md](plan-r4-ssim-image-loss.md))
+- **Ola post-cosine (hermanos independientes, parent = `…_x0_minmax_kl_cosine`):**
+  - `…_cosine_ft` — `MRI_ENCODER_MODE=finetune`
+  - `…_cosine_film_ms` — `FILM_MODE=spatial_ms` (sin R5b recon brazo MRI)
+  - `…_cosine_attn3` — `ATTN_RES=3` (grid latente ROI 24→…→3; no usar `5`)
+  - `…_cosine_label_drop` — `LABEL_DROPOUT_PROB=0.15`
+  - `…_cosine_structure` — `STRUCTURE_LOSS_LAMBDA=1.0` (CycleGAN eq. 5 \(1-\mathrm{SSIM}\); **no apilar** con `DIFFUSION_SSIM_LAMBDA`)
 
-**Parent fijo (actualizado post-R1c):** R2, R3 y R4 cuelgan del baseline ganador `…_x0_minmax_kl` (no de R1c) con **un solo override cada uno**. Tras evaluar, el operador elige qué deltas conservar en una clave “stack” posterior si hace falta combinar ganadores. R7 cuelga de R6 (label dropout).
+**Parent fijo (actualizado):** R2/R3/R4 cuelgan de `…_x0_minmax_kl`. Tras R2 cosine como baseline de clasificación, la ola conditioning/hygiene cuelga de **cosine** con un delta cada una (UNet scratch). `base_…_minmax_kl` solo aporta paths/AAE; no es el competidor de métricas.
 
 ### A3. Documentación de bloques (vista global + comandos)
 
@@ -135,27 +138,15 @@ python3 scripts/run_ablation.py <clave_R2|R3|R4> --gpu N
 python3 scripts/run_ablation.py calib_roi3ch_uni_rois_reproc_x0_minmax_kl_ssim --gpu N
 ```
 
-Solo cuando el usuario lo decida y tras mirar el padre. R2–R4 son hermanos sobre el baseline `…_x0_minmax_kl` (R2 cosine pendiente; R3 ROI×10 evaluado; R4 SSIM en curso).
+Solo cuando el usuario lo decida y tras mirar el padre. R2–R4 son hermanos sobre `…_x0_minmax_kl` (R2 cosine = baseline clasificación; R3/R4 evaluados aparte).
 
-### R5 / R6 — Extras
+### Ola sobre cosine (ft / film_ms / attn3 / label_drop / structure)
 
-Igual: una clave (o tres ablaciones MRI) bajo demanda; label dropout a continuación.
-
-### R7 — Structure loss (eq. 5 del paper CycleGAN MRI↔SPECT)
-
-Tras R6 (o el mejor stack post-dropout):
-
-\[
-L_{\mathrm{structure}} = 1 - \mathrm{SSIM}(y,\hat{y})
-\]
-
-en SPECT decodificado vs GT (misma implementación 3D que R4). **R4** usa `DIFFUSION_SSIM_LAMBDA=1.0` (peso PASTA); **R7** (`STRUCTURE_LOSS_LAMBDA`) no debe sumarse a la vez si el término es el mismo `(1−SSIM)`.
+Cinco claves independientes; ver tabla en [RUNBOOK.md](../RUNBOOK.md) § «Ablaciones independientes sobre minmax_kl_cosine». Structure = CycleGAN eq. 5; criterio vs padre cosine: PSNR/SSIM (y ROI) / clasificación no peores; DDIM estable.
 
 ```bash
-python3 scripts/run_ablation.py calib_roi3ch_uni_rois_reproc_x0_minmax_kl1e1_structure --gpu N
+python3 scripts/run_ablation.py calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_structure --gpu N
 ```
-
-Criterio: PSNR/SSIM (y ROI) no peores que el padre R6; DDIM estable.
 
 ---
 
@@ -173,8 +164,7 @@ Cada bloque R queda como todo pendiente de ejecución manual en el RUNBOOK.
 
 - R0: 1 eval
 - R1: 2 AAE + 1 UNet
-- R2–R4: hasta 3 UNet (hermanos de un delta sobre R1c)
-- R5–R6: extras
-- R7: 1 UNet (structure loss tras label dropout)
+- R2–R4: hasta 3 UNet (hermanos sobre `…_x0_minmax_kl`; R2 cosine = baseline clasificación)
+- Ola cosine: hasta 5 UNet (ft, film_ms, attn3, label_drop, structure)
 
 Trazabilidad: `parent` / `prerequisite` / `run_manifest.json`.

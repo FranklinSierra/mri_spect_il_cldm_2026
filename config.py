@@ -16,6 +16,13 @@ early_stopping_patience = int(os.getenv("ILCLDM_EARLY_STOPPING_PATIENCE", "10"))
 EARLY_STOP_MIN_DELTA = float(os.getenv("ILCLDM_EARLY_STOP_MIN_DELTA", "0.0"))
 # Global L2 grad clip after backward, before optimizer.step. 0 = off (baseline).
 GRAD_CLIP_NORM = float(os.getenv("ILCLDM_GRAD_CLIP_NORM", "0"))
+# Phase-2 LR schedule: none | cosine (CosineAnnealingLR over epochs).
+_env_lr_scheduler = os.getenv("ILCLDM_LR_SCHEDULER", "none").strip().lower()
+if _env_lr_scheduler not in ("none", "cosine"):
+    raise ValueError(
+        f"ILCLDM_LR_SCHEDULER must be none|cosine, got {_env_lr_scheduler!r}"
+    )
+LR_SCHEDULER = _env_lr_scheduler
 time_dim = 128
 num_classes = 2
 Lambda = 100
@@ -169,6 +176,11 @@ DIFFUSION_ROI_WEIGHT = float(os.getenv("ILCLDM_DIFFUSION_ROI_WEIGHT", "0"))
 # Stage-2 R4: λ(1−SSIM) on decoded SPECT vs GT when objective is x0. 0 = off.
 # PASTA adds (1−SSIM) unweighted → λ=1.0. Applied every training step.
 DIFFUSION_SSIM_LAMBDA = float(os.getenv("ILCLDM_DIFFUSION_SSIM_LAMBDA", "0"))
+
+# CycleGAN MRI↔SPECT structure loss (eq. 5): λ(1−SSIM) on decoded SPECT vs GT.
+# Same math as DIFFUSION_SSIM_LAMBDA; separate flag for ablation provenance.
+# If both >0, only STRUCTURE_LOSS_LAMBDA is applied (no double count). 0 = off.
+STRUCTURE_LOSS_LAMBDA = float(os.getenv("ILCLDM_STRUCTURE_LOSS_LAMBDA", "0"))
 
 # Stage-2 v2: early stopping on validation latent MSE (else legacy PSNR+SSIM*10)
 EARLY_STOP_LATENT_METRIC = os.getenv("ILCLDM_EARLY_STOP_LATENT_METRIC", "0") == "1"
