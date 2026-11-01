@@ -637,6 +637,28 @@
         "ILCLDM_USE_FILM": "0"
       }
     },
+    "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_film_ms_ws": {
+      "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_film_ms_ws",
+      "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_film_ms_ws",
+      "label": "cosine + spatial FiLM warm-start from cosine UNet (compare vs film_ms scratch)",
+      "short_label": "rois_reproc_x0_minmax_kl_cosine_film_ms_ws",
+      "early_stop": "latent",
+      "split_profile": "data_rois",
+      "base": "base_calib_roi3ch_uni_rois_reproc_minmax_kl",
+      "parent": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine",
+      "init_checkpoint": "result/exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine/Unet.pth.tar",
+      "prerequisite": "Warm-start UNet from cosine Unet.pth.tar (strict=False: FiLM layers random); same FILM_MODE=spatial_ms as film_ms scratch; compare vs …_cosine_film_ms",
+      "overrides": {
+        "ILCLDM_DIFFUSION_OBJECTIVE": "x0",
+        "ILCLDM_EARLY_STOP_LATENT_METRIC": "1",
+        "ILCLDM_LATENT_CALIBRATION": "0",
+        "ILCLDM_PRED_X0_CLAMP": "4",
+        "ILCLDM_LR_SCHEDULER": "cosine",
+        "ILCLDM_BATCH_SIZE": "2",
+        "ILCLDM_FILM_MODE": "spatial_ms",
+        "ILCLDM_USE_FILM": "0"
+      }
+    },
     "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_attn3": {
       "exp": "exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_attn3",
       "run_id": "calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine_attn3",

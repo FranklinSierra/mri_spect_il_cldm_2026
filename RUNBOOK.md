@@ -1136,7 +1136,8 @@ Cinco hermanos, UNet scratch, **un solo delta** cada uno. Sin R5b (recon brazo M
 | Clave | Delta |
 |-------|-------|
 | `…_cosine_ft` | `MRI_ENCODER_MODE=finetune` |
-| `…_cosine_film_ms` | `FILM_MODE=spatial_ms` |
+| `…_cosine_film_ms` | `FILM_MODE=spatial_ms` (UNet scratch) |
+| `…_cosine_film_ms_ws` | mismo FiLM + warm-start `init_checkpoint` = cosine `Unet.pth.tar` (comparar vs scratch) |
 | `…_cosine_attn3` | `ATTN_RES=3` |
 | `…_cosine_label_drop` | `LABEL_DROPOUT_PROB=0.15` |
 | `…_cosine_structure` | `STRUCTURE_LOSS_LAMBDA=1.0` |

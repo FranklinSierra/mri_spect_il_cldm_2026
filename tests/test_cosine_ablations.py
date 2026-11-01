@@ -62,6 +62,23 @@ def test_cosine_film_ms_single_delta():
     assert env["ILCLDM_FILM_MODE"] == "spatial_ms"
     assert env["ILCLDM_MRI_ENCODER_MODE"] == "frozen"
     assert env.get("ILCLDM_ATTN_RES", "4") == "4" or "ILCLDM_ATTN_RES" not in env
+    assert "init_checkpoint" not in entry
+    assert "ILCLDM_UNET_INIT_CHECKPOINT" not in env
+
+
+def test_cosine_film_ms_ws_warm_start():
+    registry = load_registry()
+    entry, env = resolve_env(registry, f"{PARENT}_film_ms_ws")
+    assert entry["parent"] == PARENT
+    _assert_inherits_cosine(env)
+    assert env["ILCLDM_FILM_MODE"] == "spatial_ms"
+    assert env["ILCLDM_MRI_ENCODER_MODE"] == "frozen"
+    assert entry["init_checkpoint"] == (
+        "result/exp_nm_s2_frozen_calib_roi3ch_uni_rois_reproc_x0_minmax_kl_cosine/Unet.pth.tar"
+    )
+    assert env["ILCLDM_UNET_INIT_CHECKPOINT"] == entry["init_checkpoint"]
+    assert entry["exp"].endswith("_film_ms_ws")
+    assert entry["exp"] != resolve_env(registry, f"{PARENT}_film_ms")[0]["exp"]
 
 
 def test_cosine_attn3_single_delta():

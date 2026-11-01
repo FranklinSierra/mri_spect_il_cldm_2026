@@ -67,7 +67,8 @@ Por eso el **Padre es cosine** (mejores resultados de clasificación): las 5 abl
 | Clave | Override único (delta) |
 | --- | --- |
 | `…_cosine_ft` | `ILCLDM_MRI_ENCODER_MODE=finetune` |
-| `…_cosine_film_ms` | `ILCLDM_FILM_MODE=spatial_ms` |
+| `…_cosine_film_ms` | `ILCLDM_FILM_MODE=spatial_ms` (UNet scratch) |
+| `…_cosine_film_ms_ws` | mismo FiLM + `init_checkpoint` cosine UNet (vs scratch) |
 | `…_cosine_attn3` | `ILCLDM_ATTN_RES=3` |
 | `…_cosine_label_drop` | `ILCLDM_LABEL_DROPOUT_PROB=0.15` |
 | `…_cosine_structure` | `ILCLDM_STRUCTURE_LOSS_LAMBDA=1.0` |
